@@ -1,0 +1,36 @@
+package poa
+
+import "math"
+
+// ---------------------------------------------------------------------------
+// Tolerances
+// ---------------------------------------------------------------------------
+
+const (
+	// moneyTol is half a penny — the right bar for a single line.
+	moneyTol = 0.05
+	// docTol is the bar for a document total, which is a sum of already-rounded
+	// lines. Rounding accumulates, so the line tolerance is too tight here.
+	docTol = 0.02
+)
+
+// ---------------------------------------------------------------------------
+// Optional values
+// ---------------------------------------------------------------------------
+
+// Deref reads an optional float without panicking on nil.
+// ok == false means the supplier does not print this field at all — which is
+// not the same as printing zero, and must not be verified as though it were.
+func Deref(p *float64) (float64, bool) {
+	if p == nil {
+		return 0, false
+	}
+	return *p, true
+}
+
+// Ptr returns the address of v. Needed because Go will not let you take the
+// address of an expression or a function's return value. Each call allocates,
+// so results never alias one another.
+func Ptr[T any](v T) *T { return &v }
+
+func round2(f float64) float64 { return math.Round(f*100) / 100 }
