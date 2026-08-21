@@ -57,7 +57,8 @@ func (r *Review) BuildExcelBytes() ([]byte, error) {
 		// BC side (PurchaseOrderLine)
 		"BC ItemNo", "BC Description", "BC Qty", "BC Unit Cost", "BC Disc %", "BC Disc Amt", "BC NetAmount",
 		// match metadata (LineMatch)
-		"Score", "DescScore", "PackRatio", "NetOK", "QtyOK", "InternalOK", "FullyVerified")
+		"Score", "DescScore", "DescScoreRaw", "DescMargin", "IdentityConfident", "PackRatio", "NetOK", "QtyOK", "InternalOK", "FullyVerified",
+		"CodeMatch", "CodeMatchSource", "SeatsOK")
 	for i, m := range r.Matches {
 		row := i + 2
 		// Absent line total -> blank cell, not a pointer address, not 0.
@@ -75,21 +76,22 @@ func (r *Review) BuildExcelBytes() ([]byte, error) {
 			m.BC.Item.DirectUnitCost, m.BC.Item.DiscountPercent, m.BC.Item.DiscountAmount,
 			m.BC.Item.NetAmount,
 
-			m.Score, m.DescScore, m.PackRatio,
+			m.Score, m.DescScore, m.DescScoreRaw, m.DescMargin, m.IdentityConfident(), m.PackRatio,
 			m.NetOK, m.QtyOK, m.InternalOK, m.FullyVerified(),
+			m.CodeMatch, m.CodeMatchSource, m.SeatsOK,
 		})
 
-		cell := fmt.Sprintf("T%d", row)
+		cell := fmt.Sprintf("W%d", row)
 		if !m.NetOK {
 			f.SetCellStyle("Matches", cell, cell, redFill)
 		}
 
-		cell = fmt.Sprintf("U%d", row)
+		cell = fmt.Sprintf("X%d", row)
 		if !m.QtyOK {
 			f.SetCellStyle("Matches", cell, cell, redFill)
 		}
 
-		cell = fmt.Sprintf("V%d", row)
+		cell = fmt.Sprintf("Y%d", row)
 		if !m.InternalOK {
 			f.SetCellStyle("Matches", cell, cell, redFill)
 		}
@@ -112,12 +114,27 @@ func (r *Review) BuildExcelBytes() ([]byte, error) {
 	}
 
 	// ---- Review: ReviewLine fields ----
+	// Registered as a real Excel Table (not just a header + rows): Graph's
+	// "list rows present in a table" action, which the Phase 2 feedback
+	// endpoint reads this sheet through, requires one.
 	if len(r.ReviewLines) > 0 {
-		header("Review", "POADescription", "BCDescription", "Discrepancies")
+		reviewCols := []interface{}{
+			"PF", "VendorNo", "VendorName", "POADescription", "BCDescription", "Discrepancies",
+			"BCLineID", "BCItemNo", "POALineIndex", "EngineVersion", "RowHash",
+		}
+		header("Review", reviewCols...)
 		for i, rl := range r.ReviewLines {
 			f.SetSheetRow("Review", fmt.Sprintf("A%d", i+2), &[]interface{}{
-				rl.POADescription, rl.BCDescription, strings.Join(rl.Discrepancies, "; "),
+				rl.PF, rl.VendorNo, rl.VendorName, rl.POADescription, rl.BCDescription, strings.Join(rl.Discrepancies, "; "),
+				rl.BCLineID, rl.BCItemNo, rl.POALineIndex, rl.EngineVersion, rl.RowHash,
 			})
+		}
+		lastCol, _ := excelize.ColumnNumberToName(len(reviewCols))
+		if err := f.AddTable("Review", &excelize.Table{
+			Range: fmt.Sprintf("A1:%s%d", lastCol, len(r.ReviewLines)+1),
+			Name:  "ReviewTable",
+		}); err != nil {
+			return nil, fmt.Errorf("add review table: %w", err)
 		}
 	}
 

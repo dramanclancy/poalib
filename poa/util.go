@@ -1,6 +1,11 @@
 package poa
 
-import "math"
+import (
+	"crypto/sha256"
+	"encoding/hex"
+	"fmt"
+	"math"
+)
 
 // ---------------------------------------------------------------------------
 // Tolerances
@@ -9,9 +14,6 @@ import "math"
 const (
 	// moneyTol is half a penny — the right bar for a single line.
 	moneyTol = 0.05
-	// docTol is the bar for a document total, which is a sum of already-rounded
-	// lines. Rounding accumulates, so the line tolerance is too tight here.
-	docTol = 0.02
 )
 
 // ---------------------------------------------------------------------------
@@ -34,3 +36,13 @@ func Deref(p *float64) (float64, bool) {
 func Ptr[T any](v T) *T { return &v }
 
 func round2(f float64) float64 { return math.Round(f*100) / 100 }
+
+// rowHash is a stable identifier for a review row, derived from the fields
+// that identify what it refers to (PF, BC line ID, POA line index). It lets
+// a later feedback endpoint detect a row whose underlying line no longer
+// exists (order re-run, line renumbered) without depending on description
+// text, which can legitimately change between runs.
+func rowHash(parts ...string) string {
+	h := sha256.Sum256([]byte(fmt.Sprint(parts)))
+	return hex.EncodeToString(h[:])[:16]
+}

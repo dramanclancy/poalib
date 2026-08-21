@@ -59,13 +59,13 @@ type purchaseOrderListResponse struct {
 
 // PurchaseOrder mirrors the BC API v2.0 purchaseOrders entity (subset).
 type PurchaseOrder struct {
-	ETag               string	`json:"@odata.etag"`
-	ID                 string	`json:"id"`
-	Number             string	`json:"number"`
-	VendorNumber       string	`json:"vendorNumber"`
-	VendorName         string	`json:"vendorName"`
-	Status             string	`json:"status"`
-	TotalAmountExclTax float64	`json:"totalAmountExcludingTax"`
+	ETag               string  `json:"@odata.etag"`
+	ID                 string  `json:"id"`
+	Number             string  `json:"number"`
+	VendorNumber       string  `json:"vendorNumber"`
+	VendorName         string  `json:"vendorName"`
+	Status             string  `json:"status"`
+	TotalAmountExclTax float64 `json:"totalAmountExcludingTax"`
 
 	PurchaseOrderLines []PurchaseOrderLine `json:"purchaseOrderLines"`
 }
@@ -85,8 +85,27 @@ type PurchaseOrderLine struct {
 	Quantity         float64 `json:"quantity"`
 	DirectUnitCost   float64 `json:"directUnitCost"`
 	DiscountPercent  float64 `json:"discountPercent"`
-	DiscountAmount  float64 `json:"discountAmount"`
+	DiscountAmount   float64 `json:"discountAmount"`
 	NetAmount        float64 `json:"netAmount"`
+
+	// DisplayName / DisplayName2 are not part of the purchaseOrderLines
+	// payload itself; EnhancePurchaseOrderLines fills them in from the
+	// item's own record after the fact.
+	DisplayName  string `json:"-"`
+	DisplayName2 string `json:"-"`
+}
+
+// Item mirrors the BC API v2.0 items entity (subset) — see
+// tools/testBCGetItem.ps1 for the full schema returned by the endpoint.
+type Item struct {
+	ID           string `json:"id"`
+	Number       string `json:"number"`
+	DisplayName  string `json:"displayName"`
+	DisplayName2 string `json:"displayName2"`
+}
+
+type itemListResponse struct {
+	Value []Item `json:"value"`
 }
 
 // ---------------------------------------------------------------------------
@@ -184,9 +203,9 @@ func (c *BCClient) GetPurchaseOrderID(ctx context.Context, poNumber string) (str
 	return po.ID, nil
 }
 
-func (c *BCClient) GetitemRange(ctx context.Context, IT string) (*PurchaseOrder, error) {
+func (c *BCClient) GetitemRange(ctx context.Context, IT string) (*Item, error) {
 	if IT == "" {
-		return nil, errors.New("businesscentral: empty purchase order number")
+		return nil, errors.New("businesscentral: empty item number")
 	}
 	params := url.Values{}
 	params.Set("$filter", fmt.Sprintf("number eq '%s'", escapeODataString(IT)))
@@ -198,16 +217,47 @@ func (c *BCClient) GetitemRange(ctx context.Context, IT string) (*PurchaseOrder,
 	if status != http.StatusOK {
 		return nil, fmt.Errorf("BC API returned %d: %s", status, string(body))
 	}
-	var parsed purchaseOrderListResponse
+	var parsed itemListResponse
 	if err := json.Unmarshal(body, &parsed); err != nil {
 		return nil, fmt.Errorf("parsing response: %w", err)
 	}
 	if len(parsed.Value) == 0 {
-		return nil, fmt.Errorf("Item Number %q not found", IT)
+		return nil, fmt.Errorf("item number %q not found", IT)
 	}
 	if len(parsed.Value) > 1 {
-		return nil, fmt.Errorf("Item Number %q matched %d records; expected exactly 1", IT, len(parsed.Value))
+		return nil, fmt.Errorf("item number %q matched %d records; expected exactly 1", IT, len(parsed.Value))
 	}
 
 	return &parsed.Value[0], nil
+}
+
+// EnhancePurchaseOrderLines looks up the Item record behind each "Item" line
+// and copies its displayName/displayName2 onto the line, so downstream
+// description matching can prefer the item's own name over the PO line's
+// free-text Description. Lookups are cached per item number since multiple
+// lines on the same order commonly reference the same item. A line whose
+// item lookup fails is left as-is rather than failing the whole order — the
+// PO line's Description still stands in for it.
+func (c *BCClient) EnhancePurchaseOrderLines(ctx context.Context, lines []PurchaseOrderLine) []PurchaseOrderLine {
+	out := make([]PurchaseOrderLine, len(lines))
+	copy(out, lines)
+
+	cache := make(map[string]*Item)
+	for i := range out {
+		if out[i].LineType != "Item" || out[i].LineObjectNumber == "" {
+			continue
+		}
+		number := out[i].LineObjectNumber
+		item, looked := cache[number]
+		if !looked {
+			item, _ = c.GetitemRange(ctx, number)
+			cache[number] = item
+		}
+		if item == nil {
+			continue
+		}
+		out[i].DisplayName = item.DisplayName
+		out[i].DisplayName2 = item.DisplayName2
+	}
+	return out
 }

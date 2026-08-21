@@ -37,6 +37,13 @@ type BCLineGroup struct {
 	Item         businesscentral.PurchaseOrderLine
 	Comments     []businesscentral.PurchaseOrderLine
 	CombinedDesc string
+
+	// Detail is the item's CaseysItems enrichment (Model_No, Vendor_Item_No,
+	// Range_Code, ...), nil when the line has no item (Account/G-L/Fixed
+	// Asset/Resource lines) or the lookup failed. Every read must nil-check —
+	// a failed enrichment call degrades to Phase 1 behaviour, it never fails
+	// the order.
+	Detail *businesscentral.CaseysItem
 }
 
 // LineMatch pairs one POA line with one BC line group and records both why
@@ -47,21 +54,48 @@ type LineMatch struct {
 	BC  BCLineGroup
 
 	// Identity — why these two were paired.
-	Score     float64
-	DescScore float64
-	PackRatio int // 1 = same unit; >1 = supplier sells packs of this size
+	Score        float64
+	DescScore    float64 // cleaned overlap: identity signal, drives assignment
+	DescScoreRaw float64 // uncleaned overlap, kept for audit / tuning
+	DescMargin   float64 // DescScore minus the best DescScore this POA line
+	// achieves against any OTHER BC group
+	DescMarginNA bool   // only one candidate group; margin is meaningless
+	DescRunnerUp string // label of the BC group DescMargin was measured against
+	PackRatio    int    // 1 = same unit; >1 = supplier sells packs of this size
+
+	// CodeMatch is exact-code identity: squash(POA text) contains
+	// squash(item.Model_No) or squash(item.Vendor_Item_No), with the guards
+	// in vocab.go's codeMatch (minimum length, vendor scoping, ambiguity).
+	// It beats fuzzy description scoring outright in IdentityConfident, so a
+	// vendor's own catalogue code printed on the acknowledgement identifies
+	// the line even when the surrounding text reads nothing like BC's.
+	CodeMatch       bool
+	CodeMatchSource string // "Model_No" / "Vendor_Item_No" / "both"; empty if no code match
+	// CodeAmbiguousWith is set when a code match was found but suppressed
+	// because another BC group in the same POA also code-matched — names
+	// that other group for the review sheet. CodeMatch is false whenever
+	// this is non-empty.
+	CodeAmbiguousWith string
 
 	// Verification — whether the pairing agrees.
 	NetOK         bool
 	QtyOK         bool
 	InternalOK    bool
 	OrientationOK bool
+	// SeatsOK is true whenever SeatsNA is true — "a check that cannot be
+	// performed passes", same convention as InternalOK/InternalNA.
+	SeatsOK bool
+	SeatsNA bool
 
 	NetDelta     float64 // POA net minus BC net; signed, for the review sheet
 	POAOrient    Orientation
 	BCOrient     Orientation
 	OrientReason string
 	InternalNA   bool // supplier prints no line total; nothing to check
+	// POASeats/BCSeats are only meaningful when !SeatsNA — the seat counts
+	// SeatsOK actually compared, kept for the review sheet.
+	POASeats float64
+	BCSeats  float64
 
 	poaIndex int
 }
@@ -83,4 +117,16 @@ type ReviewLine struct {
 	POADescription string   `json:"poaDescription"`
 	BCDescription  string   `json:"bcDescription"`
 	Discrepancies  []string `json:"discrepancies"`
+
+	// Identifiers — without these a row on the Review sheet cannot be traced
+	// back to the order/line it came from, so feedback recorded against it is
+	// unattributable. Prerequisite for the Phase 2 feedback endpoint.
+	PF            string `json:"pf"`
+	VendorNo      string `json:"vendorNo"`
+	VendorName    string `json:"vendorName"`
+	BCLineID      string `json:"bcLineId"`     // PurchaseOrderLine.ID
+	BCItemNo      string `json:"bcItemNo"`     // PurchaseOrderLine.LineObjectNumber
+	POALineIndex  int    `json:"poaLineIndex"` // index into the extracted POA product list
+	EngineVersion string `json:"engineVersion"`
+	RowHash       string `json:"rowHash"` // stable hash of the identifying fields
 }
