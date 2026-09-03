@@ -141,4 +141,20 @@ type ReviewLine struct {
 	POALineIndex  int    `json:"poaLineIndex"` // index into the extracted POA product list
 	EngineVersion string `json:"engineVersion"`
 	RowHash       string `json:"rowHash"` // stable hash of the identifying fields
+
+	// Carried for display only — never fold back into identity scoring.
+	DescScore  float64 `json:"descScore"`  // so a reviewer sees when the engine leaned on memory vs. evidence
+	DescMargin float64 `json:"descMargin"`
+	// CodeMatchSource audits which code matched ("Model_No" / "Vendor_Item_No" / "both" / "").
+	CodeMatchSource string `json:"codeMatchSource"`
+	// POACodeCandidate is the rules lookup key for Stage 3: the product code
+	// found in the POA's own text, independent of whether it matched anything.
+	POACodeCandidate string `json:"poaCodeCandidate"`
+	// POAQty/BCQty/POANet/BCNet must show on the card even when the
+	// discrepancy is not about money or quantity — a reviewer confirming
+	// identity should still see the figures they are not being asked about.
+	POAQty float64 `json:"poaQty"`
+	BCQty  float64 `json:"bcQty"`
+	POANet float64 `json:"poaNet"`
+	BCNet  float64 `json:"bcNet"`
 }

@@ -97,17 +97,25 @@ func Reconcile(ctx context.Context, bc *businesscentral.BCClient, caseys *busine
 				bcLineID := m.BC.Item.ID
 				poaIdx := m.poaIndex
 				reviewLines = append(reviewLines, ReviewLine{
-					POADescription: combinedPOADesc(m.POA),
-					BCDescription:  m.BC.CombinedDesc,
-					Discrepancies:  m.Discrepancies(),
-					PF:             pf,
-					VendorNo:       po.VendorNumber,
-					VendorName:     po.VendorName,
-					BCLineID:       bcLineID,
-					BCItemNo:       m.BC.Item.LineObjectNumber,
-					POALineIndex:   poaIdx,
-					EngineVersion:  EngineVersion,
-					RowHash:        rowHash(pf, bcLineID, fmt.Sprint(poaIdx)),
+					POADescription:   combinedPOADesc(m.POA),
+					BCDescription:    m.BC.CombinedDesc,
+					Discrepancies:    m.Discrepancies(),
+					PF:               pf,
+					VendorNo:         po.VendorNumber,
+					VendorName:       po.VendorName,
+					BCLineID:         bcLineID,
+					BCItemNo:         m.BC.Item.LineObjectNumber,
+					POALineIndex:     poaIdx,
+					EngineVersion:    EngineVersion,
+					RowHash:          rowHash(pf, bcLineID, fmt.Sprint(poaIdx)),
+					DescScore:        m.DescScore,
+					DescMargin:       m.DescMargin,
+					CodeMatchSource:  m.CodeMatchSource,
+					POACodeCandidate: productCodeIn(combinedPOADesc(m.POA)),
+					POAQty:           float64(m.POA.Qty),
+					BCQty:            m.BC.Item.Quantity,
+					POANet:           effectiveNetLine(m.POA),
+					BCNet:            m.BC.Item.NetAmount,
 				})
 			}
 			writeOK = writeOK && m.FullyVerified()
