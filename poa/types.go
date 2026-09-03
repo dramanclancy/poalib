@@ -76,6 +76,13 @@ type LineMatch struct {
 	// that other group for the review sheet. CodeMatch is false whenever
 	// this is non-empty.
 	CodeAmbiguousWith string
+	// CodeVariantAmbiguous is set when a code match was withdrawn because the
+	// code names a product family while the order carries more than one
+	// variant of it — Ashwood's STGTS1 (A) and STGTS1 (C), which resolve to
+	// different items — and BC holds no code that tells the variants apart.
+	// Holds a ready phrase naming the competing variants. CodeMatch is false
+	// whenever this is non-empty. See resolveVariantAmbiguity.
+	CodeVariantAmbiguous string
 
 	// Verification — whether the pairing agrees.
 	NetOK         bool
@@ -114,9 +121,14 @@ type Review struct {
 }
 
 type ReviewLine struct {
-	POADescription string   `json:"poaDescription"`
-	BCDescription  string   `json:"bcDescription"`
-	Discrepancies  []string `json:"discrepancies"`
+	POADescription string `json:"poaDescription"`
+	BCDescription  string `json:"bcDescription"`
+	// Discrepancies is every reason this line needs a human, kept as separate
+	// typed entries rather than joined prose. Phase 2 turns each one into its
+	// own review-queue row so a verdict applies to exactly one reason: a
+	// reviewer approving "descriptions look different; net differs by £24"
+	// would otherwise pardon both, and the second must never be pardonable.
+	Discrepancies []Discrepancy `json:"discrepancies"`
 
 	// Identifiers — without these a row on the Review sheet cannot be traced
 	// back to the order/line it came from, so feedback recorded against it is

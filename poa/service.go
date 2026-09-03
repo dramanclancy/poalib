@@ -97,7 +97,7 @@ func Reconcile(ctx context.Context, bc *businesscentral.BCClient, caseys *busine
 				bcLineID := m.BC.Item.ID
 				poaIdx := m.poaIndex
 				reviewLines = append(reviewLines, ReviewLine{
-					POADescription: m.POA.Product + " " + m.POA.Description + " " + m.POA.Description2 + " " + m.POA.Description3,
+					POADescription: combinedPOADesc(m.POA),
 					BCDescription:  m.BC.CombinedDesc,
 					Discrepancies:  m.Discrepancies(),
 					PF:             pf,

@@ -3,15 +3,14 @@ package msgraph
 
 import (
 	"context"
-	
 
 	"github.com/Azure/azure-sdk-for-go/sdk/azcore/policy"
 	"github.com/Azure/azure-sdk-for-go/sdk/azidentity"
-	
+
 	auth "github.com/microsoft/kiota-authentication-azure-go"
 	msgraphsdk "github.com/microsoftgraph/msgraph-sdk-go"
-	
 )
+
 const (
 	ScopeGraph = "https://graph.microsoft.com/.default"
 	ScopeBC    = "https://api.businesscentral.dynamics.com/.default"
@@ -30,7 +29,7 @@ type GraphAuth struct {
 	//client secret for the application
 	clientSecretCredential *azidentity.ClientSecretCredential
 	//Graph service client
-	appClient              *msgraphsdk.GraphServiceClient
+	appClient *msgraphsdk.GraphServiceClient
 }
 
 func NewGraphAuth(cfg Appconfig) (*GraphAuth, error) {
@@ -67,7 +66,4 @@ func (g *GraphAuth) GetAppToken(scope string) (string, error) {
 	return token.Token, nil
 }
 
-func (g *GraphAuth) GetGraphToken() (string, error) { return g.GetAppToken(ScopeGraph) }
-func (g *GraphAuth) GetBCToken() (string, error)    { return g.GetAppToken(ScopeBC) }
 // InitGraphAuth initializes the GraphAuth instance with the provided app configuration.
-

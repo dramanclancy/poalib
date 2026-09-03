@@ -2,7 +2,6 @@ package poa
 
 import (
 	"fmt"
-	"strings"
 
 	"github.com/xuri/excelize/v2"
 )
@@ -11,26 +10,31 @@ import (
 func (r *Review) BuildExcelBytes() ([]byte, error) {
 
 	f := excelize.NewFile()
-	defer f.Close()
+	defer func(f *excelize.File) {
+		err := f.Close()
+		if err != nil {
+
+		}
+	}(f)
 	redFill, _ := f.NewStyle(&excelize.Style{
 		Fill: excelize.Fill{Type: "pattern", Pattern: 1, Color: []string{"FFC7CE"}},
 		Font: &excelize.Font{Color: "9C0006"},
 	})
 
-	f.SetSheetName("Sheet1", "Summary")
-	f.NewSheet("Matches")
-	f.NewSheet("Unmatched POA")
+	_ = f.SetSheetName("Sheet1", "Summary")
+	_, _ = f.NewSheet("Matches")
+	_, _ = f.NewSheet("Unmatched POA")
 	if len(r.ReviewLines) > 0 {
-		f.NewSheet("Review")
+		_, _ = f.NewSheet("Review")
 	}
-	f.NewSheet("BC Lines")
+	_, _ = f.NewSheet("BC Lines")
 
 	bold, _ := f.NewStyle(&excelize.Style{Font: &excelize.Font{Bold: true}})
 	header := func(sheet string, cols ...interface{}) {
-		f.SetSheetRow(sheet, "A1", &cols)
+		_= f.SetSheetRow(sheet, "A1", &cols)
 		last, _ := excelize.ColumnNumberToName(len(cols))
-		f.SetCellStyle(sheet, "A1", last+"1", bold)
-		f.SetPanes(sheet, &excelize.Panes{Freeze: true, YSplit: 1, TopLeftCell: "A2", ActivePane: "bottomLeft"})
+		_= f.SetCellStyle(sheet, "A1", last+"1", bold)
+		_ = f.SetPanes(sheet, &excelize.Panes{Freeze: true, YSplit: 1, TopLeftCell: "A2", ActivePane: "bottomLeft"})
 	}
 
 	// ---- Summary: review + OrderVerification fields, one row ----
@@ -38,7 +42,7 @@ func (r *Review) BuildExcelBytes() ([]byte, error) {
 		"PF", "Vendor", "Ack Date", "Reference No", "BCStatus", "WriteOK",
 		"POATotal", "Verification Total", "BCTotal", "MatchedTotal", "TotalExVATOK",
 		"LinesMatched", "LinesUnmatched", "FlaggedLines")
-	f.SetSheetRow("Summary", "A2", &[]interface{}{
+	_ = f.SetSheetRow("Summary", "A2", &[]interface{}{
 		r.Extraction.PF, r.BCOrder.VendorName, r.Extraction.ProposedDeliveryDate, r.Extraction.ReferenceNumber, r.BCOrder.Status, r.WriteOK,
 		r.Verification.POATotal, r.Verification.TotalSource, r.Verification.BCTotal, r.Verification.MatchedTotal,
 		r.Verification.TotalExVATOK,
@@ -46,7 +50,7 @@ func (r *Review) BuildExcelBytes() ([]byte, error) {
 	})
 
 	if r.Verification.TotalExVATOK == false {
-		f.SetCellStyle("Summary", "K2", "K2", redFill)
+		_= f.SetCellStyle("Summary", "K2", "K2", redFill)
 	}
 
 	// ---- Matches: every OrderDetail / BC field as its own column ----
@@ -67,7 +71,7 @@ func (r *Review) BuildExcelBytes() ([]byte, error) {
 			lineTotal = total
 		}
 
-		f.SetSheetRow("Matches", fmt.Sprintf("A%d", row), &[]interface{}{
+		_ = f.SetSheetRow("Matches", fmt.Sprintf("A%d", row), &[]interface{}{
 			m.POA.Product, m.POA.Description, m.POA.Description2, m.POA.Description3,
 			m.POA.Qty, m.POA.UnitProductPrice, m.POA.DiscountPercent, m.POA.DiscountFigure,
 			lineTotal, // <- was m.POA.TotalProductQtyPrice (the pointer)
@@ -83,17 +87,17 @@ func (r *Review) BuildExcelBytes() ([]byte, error) {
 
 		cell := fmt.Sprintf("W%d", row)
 		if !m.NetOK {
-			f.SetCellStyle("Matches", cell, cell, redFill)
+			_ = f.SetCellStyle("Matches", cell, cell, redFill)
 		}
 
 		cell = fmt.Sprintf("X%d", row)
 		if !m.QtyOK {
-			f.SetCellStyle("Matches", cell, cell, redFill)
+			_ = f.SetCellStyle("Matches", cell, cell, redFill)
 		}
 
 		cell = fmt.Sprintf("Y%d", row)
 		if !m.InternalOK {
-			f.SetCellStyle("Matches", cell, cell, redFill)
+			_ = f.SetCellStyle("Matches", cell, cell, redFill)
 		}
 	}
 
@@ -107,7 +111,7 @@ func (r *Review) BuildExcelBytes() ([]byte, error) {
 		if total, ok := Deref(d.TotalProductQtyPrice); ok {
 			lineTotal = total
 		}
-		f.SetSheetRow("Unmatched POA", fmt.Sprintf("A%d", i+2), &[]interface{}{
+		_ = f.SetSheetRow("Unmatched POA", fmt.Sprintf("A%d", i+2), &[]interface{}{
 			d.Product, d.Description, d.Description2, d.Description3,
 			d.Qty, d.UnitProductPrice, d.DiscountPercent, d.DiscountFigure, lineTotal,
 		})
@@ -117,21 +121,46 @@ func (r *Review) BuildExcelBytes() ([]byte, error) {
 	// Registered as a real Excel Table (not just a header + rows): Graph's
 	// "list rows present in a table" action, which the Phase 2 feedback
 	// endpoint reads this sheet through, requires one.
+	//
+	// One row per DISCREPANCY, not per line. A line flagged for two reasons
+	// gets two rows, differing only in DiscrepancyType and Discrepancy, so a
+	// verdict recorded against a row applies to exactly one reason. Joining
+	// them into a cell — as v6.2 did — makes "approved" ambiguous on any line
+	// carrying both an identity doubt and a price difference, and the second
+	// of those must never be pardonable. This mirrors the SharePoint List
+	// schema Phase 2 stage 1 writes, so the two surfaces stay a direct
+	// translation of each other.
 	if len(r.ReviewLines) > 0 {
 		reviewCols := []interface{}{
-			"PF", "VendorNo", "VendorName", "POADescription", "BCDescription", "Discrepancies",
+			"PF", "VendorNo", "VendorName", "POADescription", "BCDescription",
+			"DiscrepancyType", "Discrepancy",
 			"BCLineID", "BCItemNo", "POALineIndex", "EngineVersion", "RowHash",
 		}
 		header("Review", reviewCols...)
-		for i, rl := range r.ReviewLines {
-			f.SetSheetRow("Review", fmt.Sprintf("A%d", i+2), &[]interface{}{
-				rl.PF, rl.VendorNo, rl.VendorName, rl.POADescription, rl.BCDescription, strings.Join(rl.Discrepancies, "; "),
-				rl.BCLineID, rl.BCItemNo, rl.POALineIndex, rl.EngineVersion, rl.RowHash,
-			})
+
+		row := 2
+		for _, rl := range r.ReviewLines {
+			// A ReviewLine is only built for a line that failed something, so
+			// an empty list should not occur. Emit a row with a blank reason
+			// rather than dropping it: a silently missing line is worse than a
+			// visibly unexplained one.
+			reasons := rl.Discrepancies
+			if len(reasons) == 0 {
+				reasons = []Discrepancy{{}}
+			}
+			for _, d := range reasons {
+				_ = f.SetSheetRow("Review", fmt.Sprintf("A%d", row), &[]interface{}{
+					rl.PF, rl.VendorNo, rl.VendorName, rl.POADescription, rl.BCDescription,
+					string(d.Kind), d.Message,
+					rl.BCLineID, rl.BCItemNo, rl.POALineIndex, rl.EngineVersion, rl.RowHash,
+				})
+				row++
+			}
 		}
+
 		lastCol, _ := excelize.ColumnNumberToName(len(reviewCols))
 		if err := f.AddTable("Review", &excelize.Table{
-			Range: fmt.Sprintf("A1:%s%d", lastCol, len(r.ReviewLines)+1),
+			Range: fmt.Sprintf("A1:%s%d", lastCol, row-1),
 			Name:  "ReviewTable",
 		}); err != nil {
 			return nil, fmt.Errorf("add review table: %w", err)
@@ -143,7 +172,7 @@ func (r *Review) BuildExcelBytes() ([]byte, error) {
 		"Sequence", "LineType", "ItemNo", "Description",
 		"Qty", "UnitCost", "Disc %", "DiscAmt", "NetAmount")
 	for i, l := range r.UnmatchedBC {
-		f.SetSheetRow("BC Lines", fmt.Sprintf("A%d", i+2), &[]interface{}{
+		_ = f.SetSheetRow("BC Lines", fmt.Sprintf("A%d", i+2), &[]interface{}{
 			l.Item.Sequence, l.Item.LineType, l.Item.LineObjectNumber, l.Item.Description,
 			l.Item.Quantity, l.Item.DirectUnitCost, l.Item.DiscountPercent, l.Item.DiscountAmount, l.Item.NetAmount,
 		})

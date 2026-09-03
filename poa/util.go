@@ -4,7 +4,6 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
-	"math"
 )
 
 // ---------------------------------------------------------------------------
@@ -34,8 +33,6 @@ func Deref(p *float64) (float64, bool) {
 // address of an expression or a function's return value. Each call allocates,
 // so results never alias one another.
 func Ptr[T any](v T) *T { return &v }
-
-func round2(f float64) float64 { return math.Round(f*100) / 100 }
 
 // rowHash is a stable identifier for a review row, derived from the fields
 // that identify what it refers to (PF, BC line ID, POA line index). It lets

@@ -60,7 +60,13 @@
 //     to price, since a supplier can print the wrong seat count at a price
 //     that matches perfectly.
 //
-// See phase1b-item-enrichment.md.
+// v6.3 removes the last hand-maintained, vendor-keyed table from the engine.
+// Token weights are derived from the documents being matched rather than from
+// a per-vendor stoplist (vocab.go), a POA product code can abbreviate a BC
+// Range_Code (codeidentity.go), a code match is withdrawn when it names a
+// product family but not which variant the line is, and a low description
+// score caused by a missing Vendor_Item_No now says so instead of reporting a
+// similarity number that measures nothing. See docs/CURRENT_ARCHITECTURE.md.
 package poa
 
 import (
@@ -78,7 +84,7 @@ const (
 	// EngineVersion identifies the matching/verification logic that produced
 	// a Review, recorded on each ReviewLine so a later change in scoring
 	// doesn't get silently attributed to an older run.
-	EngineVersion = "v6.2"
+	EngineVersion = "v6.3"
 
 	// DescThreshold is the cleaned-similarity floor. Higher than the old 0.5
 	// because cleaning raises correct pairs into the 0.67-1.00 band.
@@ -92,6 +98,21 @@ const (
 	// must clear before it's eligible for exact-code matching. Below it, the
 	// code is short enough to appear inside unrelated text by chance.
 	minCodeLen = 6
+
+	// minProductCodeLen is the floor for RECOGNISING a POA token as a product
+	// code (productCodeIn), which is a lower bar than matching one: the result
+	// only chooses the wording of a discrepancy message, never a pairing, so a
+	// false positive costs a slightly wrong sentence on an already-flagged
+	// line rather than a wrong match. It sits below minCodeLen so short codes
+	// like CA24 are still explained rather than silently reported as a
+	// meaningless similarity score.
+	minProductCodeLen = 4
+
+	// minRangePrefixLen is how much of a Range_Code a POA product code must
+	// reproduce before it counts as abbreviating that range (HANCLR -> HANSSON
+	// shares HAN). Three is what the live Ashwood data supports; lower would
+	// pair ranges on a single shared letter.
+	minRangePrefixLen = 3
 
 	// codeMatchBonus is added to a code-matched pairing's assignment Score,
 	// large enough that assign() picks it over any description-only
@@ -112,8 +133,10 @@ const (
 // second parameter (CaseysItems enrichment) is arriving too — one struct
 // avoids further signature churn if a third input shows up later.
 type MatchContext struct {
-	// VendorNo is po.VendorNumber: keys vocabFor() and gates Vendor_Item_No
-	// code matching to items that actually belong to this PO's vendor.
+	// VendorNo is po.VendorNumber: gates Vendor_Item_No code matching to
+	// items that actually belong to this PO's vendor. It no longer selects a
+	// description vocabulary — as of v6.3 token weights are derived from the
+	// documents themselves rather than keyed by vendor (see vocab.go).
 	VendorNo string
 	// Items is CaseysItems enrichment keyed by item number
 	// (PurchaseOrderLine.LineObjectNumber). A missing or empty map degrades
@@ -168,7 +191,10 @@ func GroupBCLines(lines []businesscentral.PurchaseOrderLine) []BCLineGroup {
 func buildCombinedDesc(g BCLineGroup) string {
 	var parts []string
 	seen := map[string]bool{}
-	for _, name := range []string{g.Item.DisplayName, g.Item.DisplayName2} {
+	for _, name := range []string{
+		g.Item.DisplayName,
+		g.Item.DisplayName2,
+	} {
 		if name == "" {
 			continue
 		}
@@ -204,177 +230,6 @@ func buildCombinedDesc(g BCLineGroup) string {
 
 func combinedPOADesc(d OrderDetail) string {
 	return strings.Join([]string{d.Product, d.Description, d.Description2, d.Description3}, " ")
-}
-
-// ---------------------------------------------------------------------------
-// Normalisation & similarity
-// ---------------------------------------------------------------------------
-
-var nonAlnum = regexp.MustCompile(`[^a-z0-9 ]+`)
-
-func normalize(s string) string {
-	s = strings.ReplaceAll(s, "Â", " ") // mojibake 'Â'
-	s = strings.ReplaceAll(s, " ", " ") // NBSP
-	s = strings.ToLower(s)
-	s = nonAlnum.ReplaceAllString(s, " ")
-	return strings.Join(strings.Fields(s), " ")
-}
-
-// stem folds trivial English plurals so "surcharge" and "surcharges" are one
-// token. Without it PF129268's surcharge scored 0.000 against the BC line
-// literally named "Vendor Surcharges".
-func stem(t string) string {
-	switch {
-	case len(t) > 4 && strings.HasSuffix(t, "ies"):
-		return t[:len(t)-3] + "y"
-	case len(t) > 3 && strings.HasSuffix(t, "es") && hasSibilantStem(t[:len(t)-2]):
-		return t[:len(t)-2] // boxes -> box, dishes -> dish
-	case len(t) > 3 && strings.HasSuffix(t, "s") && !strings.HasSuffix(t, "ss"):
-		return t[:len(t)-1]
-	}
-	return t
-}
-
-// hasSibilantStem reports whether an "-es" plural is the sibilant kind
-// (box/boxes) rather than a plain +s on a word already ending in e
-// (surcharge/surcharges).
-func hasSibilantStem(base string) bool {
-	for _, suf := range []string{"s", "x", "z", "ch", "sh"} {
-		if strings.HasSuffix(base, suf) {
-			return true
-		}
-	}
-	return false
-}
-
-func tokenSet(s string) map[string]bool {
-	set := map[string]bool{}
-	for _, t := range strings.Fields(s) {
-		set[stem(t)] = true
-	}
-	return set
-}
-
-// overlapSimilarity is |A ∩ B| / min(|A|,|B|).
-//
-// Unlike Dice it does not penalise the side carrying more tokens, which
-// matters because a BC group's comment count is a property of how the product
-// was configured, not of how well it matches.
-func overlapSimilarity(a, b string) float64 {
-	setA, setB := tokenSet(normalize(a)), tokenSet(normalize(b))
-	if len(setA) == 0 || len(setB) == 0 {
-		return 0
-	}
-	inter := 0
-	for t := range setA {
-		if setB[t] {
-			inter++
-		}
-	}
-	return float64(inter) / float64(min(len(setA), len(setB)))
-}
-
-// overlapSimilaritySets is overlapSimilarity for already-tokenized sets —
-// used for the cleaned score, where tokenization has already gone through
-// cleanTokenSet's alias/stem/stopword pipeline and must not be redone.
-func overlapSimilaritySets(a, b map[string]bool) float64 {
-	if len(a) == 0 || len(b) == 0 {
-		return 0
-	}
-	inter := 0
-	for t := range a {
-		if b[t] {
-			inter++
-		}
-	}
-	return float64(inter) / float64(min(len(a), len(b)))
-}
-
-func min(a, b int) int {
-	if a < b {
-		return a
-	}
-	return b
-}
-
-// ---------------------------------------------------------------------------
-// Exact-code identity
-// ---------------------------------------------------------------------------
-
-var nonAlnumSquash = regexp.MustCompile(`[^A-Za-z0-9]+`)
-
-// squash reduces a code (or a whole POA text) to comparable form: uppercase,
-// alphanumerics only. "1341 CASH SKY21 RAL 9005" and "1341CASHSKY21RAL9005"
-// both become "1341CASHSKY21RAL9005", so a code prints identically whether
-// or not the POA spaced it out.
-func squash(s string) string {
-	return strings.ToUpper(nonAlnumSquash.ReplaceAllString(s, ""))
-}
-
-// codeHits reports whether code, squashed, is a real (non-trivial) match
-// inside poaSquashed. Below minCodeLen a code is short enough to turn up in
-// unrelated text by chance, so it is never eligible.
-func codeHits(poaSquashed, code string) bool {
-	sc := squash(code)
-	return len(sc) >= minCodeLen && strings.Contains(poaSquashed, sc)
-}
-
-// codeMatch reports whether the POA text code-matches g's item, and via
-// which field(s).
-//
-// Vendor_Item_No is vendor-scoped: it is THIS vendor's catalogue code for the
-// item, and only meaningful when the item actually belongs to the PO's
-// vendor (g.Detail.VendorNo == mc.VendorNo) — otherwise the stored code
-// belongs to a different supplier and a textual coincidence would be a false
-// positive dressed up as authoritative. Model_No carries no such constraint.
-func codeMatch(poaSquashed string, g BCLineGroup, mc MatchContext) (matched bool, source string) {
-	if g.Detail == nil {
-		return false, ""
-	}
-	modelHit := codeHits(poaSquashed, g.Detail.ModelNo)
-	vendorScoped := mc.VendorNo != "" && g.Detail.VendorNo == mc.VendorNo
-	vendorHit := vendorScoped && codeHits(poaSquashed, g.Detail.VendorItemNo)
-	switch {
-	case modelHit && vendorHit:
-		return true, "both"
-	case modelHit:
-		return true, "Model_No"
-	case vendorHit:
-		return true, "Vendor_Item_No"
-	default:
-		return false, ""
-	}
-}
-
-// resolveCodeAmbiguity clears CodeMatch on any pairing whose code also
-// matches another BC group for the same POA line — "ambiguity kills it" per
-// phase1b-item-enrichment.md section 2. The tentative CodeMatchSource is
-// left in place and CodeAmbiguousWith is filled in so Discrepancies() can
-// name what it collided with. Must run before the code-match bonus is
-// applied to Score and before fillDescMargins/the sort, since both depend on
-// the final CodeMatch value through IdentityConfident/FullyVerified.
-func resolveCodeAmbiguity(all []LineMatch) {
-	byPOA := map[int][]int{}
-	for i, m := range all {
-		if m.CodeMatch {
-			byPOA[m.poaIndex] = append(byPOA[m.poaIndex], i)
-		}
-	}
-	for _, idxs := range byPOA {
-		if len(idxs) < 2 {
-			continue
-		}
-		for _, i := range idxs {
-			var others []string
-			for _, j := range idxs {
-				if j != i {
-					others = append(others, bcGroupLabel(all[j].BC))
-				}
-			}
-			all[i].CodeMatch = false
-			all[i].CodeAmbiguousWith = strings.Join(others, ", ")
-		}
-	}
 }
 
 // ---------------------------------------------------------------------------
@@ -420,7 +275,6 @@ func effectiveNetLine(d OrderDetail) float64 {
 		return gross
 	}
 }
-func LineNet(d OrderDetail) float64 { return effectiveNetLine(d) }
 
 // effectiveUnitNet is the per-unit equivalent, used by the pack-ratio check.
 // It applies the same discount rules as effectiveNetLine so the two cannot
@@ -492,33 +346,76 @@ func (m LineMatch) IdentityConfident() bool {
 	return m.DescMarginNA || m.DescMargin >= MarginThreshold
 }
 
-func (m LineMatch) Discrepancies() []string {
-	var d []string
+// identityGapReason explains a low description score in the most actionable
+// terms the available data supports.
+//
+// The default — "descriptions look different (similarity 0.33)" — is
+// technically true and practically useless when the two sides are not
+// speaking the same kind of language at all: the POA prints a supplier SKU
+// (NFX2S) and BC prints a generic type name (2 Seater Sofa). Those share zero
+// tokens by construction, so the number measures incidental overlap between
+// comment lines rather than evidence of identity. A number that measures
+// nothing, appearing on nearly every line, is how reviewers are trained to
+// approve without reading — which matters more the moment Phase 2 starts
+// pushing these to a card.
+//
+// Where the real obstacle is a missing Vendor_Item_No, say so: that names a
+// fix (populate the field, once, for every future order) instead of a
+// symptom. See phase2-feedback-loop.md section 4 point 3.
+// The two cases are separate Kinds, not one Kind with two wordings: a missing
+// Vendor_Item_No is a master-data gap a reviewer's confirmation can close
+// permanently, while two prose descriptions disagreeing is a vocabulary
+// problem. Both are learnable, but the weekly metric wants to count them apart
+// — the first should fall as Phase 2 does its job, and the second should not.
+func (m LineMatch) identityGapReason() (DiscrepancyKind, string) {
+	if code := productCodeIn(combinedPOADesc(m.POA)); code != "" && !m.BC.hasCodeOnFile() {
+		return DiscMissingBCCode, fmt.Sprintf(
+			"POA prints product code %q but BC item %s has no Vendor_Item_No or Model_No on file to match it against (descriptions alone scored %.2f)",
+			code, m.BC.Item.LineObjectNumber, m.DescScore)
+	}
+	return DiscDescription, fmt.Sprintf(
+		"descriptions look different (similarity %.2f, raw %.2f)", m.DescScore, m.DescScoreRaw)
+}
+
+// Discrepancies lists every reason this pairing needs a human, one entry per
+// reason.
+//
+// Each carries a Kind rather than only prose: from Phase 2 on, a reviewer
+// gives a verdict against one discrepancy at a time, and the endpoint
+// recording it has to know whether that verdict may become a rule. Deciding
+// that by matching the English of the message would break the first time
+// anyone rewords one — which has already happened twice in Stage 0.
+func (m LineMatch) Discrepancies() []Discrepancy {
+	var d []Discrepancy
+	add := func(k DiscrepancyKind, format string, args ...any) {
+		d = append(d, Discrepancy{Kind: k, Message: fmt.Sprintf(format, args...)})
+	}
+
 	if !m.NetOK {
-		d = append(d, fmt.Sprintf("net line value differs from BC by %+.2f (POA %.2f, BC %.2f)",
-			m.NetDelta, effectiveNetLine(m.POA), m.BC.Item.NetAmount))
+		add(DiscNetValue, "net line value differs from BC by %+.2f (POA %.2f, BC %.2f)",
+			m.NetDelta, effectiveNetLine(m.POA), m.BC.Item.NetAmount)
 	}
 	if !m.QtyOK {
-		d = append(d, fmt.Sprintf("quantity differs (POA %d, BC %g)", m.POA.Qty, m.BC.Item.Quantity))
+		add(DiscQuantity, "quantity differs (POA %d, BC %g)", m.POA.Qty, m.BC.Item.Quantity)
 	}
 	if !m.InternalOK {
 		poaNet := effectiveNetLine(m.POA)
 		if lineTotal, ok := Deref(m.POA.TotalProductQtyPrice); ok {
-			d = append(d, fmt.Sprintf(
+			add(DiscInternalMath,
 				"the POA's own figures don't add up: net %.2f vs printed line total %.2f (diff %+.2f) — likely extraction misread",
-				poaNet, lineTotal, poaNet-lineTotal))
+				poaNet, lineTotal, poaNet-lineTotal)
 		} else {
 			// InternalOK false with no printed total => the invalid-discount case
-			d = append(d, fmt.Sprintf(
+			add(DiscInternalMath,
 				"the POA's own figures don't add up: discount %.2f%% is out of range — likely extraction misread",
-				m.POA.DiscountPercent))
+				m.POA.DiscountPercent)
 		}
 	}
 	if !m.OrientationOK {
-		d = append(d, m.OrientReason)
+		add(DiscOrientation, "%s", m.OrientReason)
 	}
 	if !m.SeatsOK {
-		d = append(d, fmt.Sprintf("seat count differs (POA states %g, BC No_of_Seats %g)", m.POASeats, m.BCSeats))
+		add(DiscSeatCount, "seat count differs (POA states %g, BC No_of_Seats %g)", m.POASeats, m.BCSeats)
 	}
 	// Same comparisons as IdentityConfident, so a line cannot be both
 	// verified and flagged at exactly the threshold/margin. Skipped when
@@ -526,14 +423,22 @@ func (m LineMatch) Discrepancies() []string {
 	// description score against it is expected, not a discrepancy.
 	if !m.CodeMatch {
 		if m.DescScore < DescThreshold {
-			d = append(d, fmt.Sprintf("descriptions look different (similarity %.2f, raw %.2f)", m.DescScore, m.DescScoreRaw))
+			kind, msg := m.identityGapReason()
+			add(kind, "%s", msg)
 		}
 		if !m.DescMarginNA && m.DescMargin < MarginThreshold {
-			d = append(d, fmt.Sprintf("ambiguous pairing: resembles %q almost equally (margin %.2f)", m.DescRunnerUp, m.DescMargin))
+			add(DiscAmbiguousPairing, "ambiguous pairing: resembles %q almost equally (margin %.2f)",
+				m.DescRunnerUp, m.DescMargin)
 		}
 	}
 	if m.CodeAmbiguousWith != "" {
-		d = append(d, fmt.Sprintf("code match on %s is ambiguous: also matches BC group(s) %s", m.CodeMatchSource, m.CodeAmbiguousWith))
+		add(DiscCodeAmbiguous, "code match on %s is ambiguous: also matches BC group(s) %s",
+			m.CodeMatchSource, m.CodeAmbiguousWith)
+	}
+	if m.CodeVariantAmbiguous != "" {
+		add(DiscVariantAmbiguous,
+			"the code identifies the product family but not the variant: this order carries %s, and BC item %s holds no code that tells them apart",
+			m.CodeVariantAmbiguous, m.BC.Item.LineObjectNumber)
 	}
 	return d
 }
@@ -542,7 +447,13 @@ func (m LineMatch) Discrepancies() []string {
 // Scoring
 // ---------------------------------------------------------------------------
 
-func scorePair(d OrderDetail, g BCLineGroup, vocab Vocab, mc MatchContext) LineMatch {
+// poaText is the POA line's description as prepareMatch left it — the raw
+// text plus any BC Range_Code its product code abbreviates. It is used for the
+// cleaned identity score only. Everything else here deliberately reads the
+// unaugmented text: DescScoreRaw must stay a faithful record of what the two
+// documents literally say, and codeMatch must never see an injected range
+// code, which would let augmentation manufacture an exact-code hit.
+func scorePair(d OrderDetail, poaText string, g BCLineGroup, vocab Vocab, mc MatchContext) LineMatch {
 	// --- identity: is this the same line? ---
 	// Orientation tokens are stripped: they are verified separately below, and
 	// "RHF/LHF" will never resemble "RIGHT" to any string metric.
@@ -551,16 +462,19 @@ func scorePair(d OrderDetail, g BCLineGroup, vocab Vocab, mc MatchContext) LineM
 		StripOrientation(g.CombinedDesc),
 	)
 
-	// Cleaned score strips vendor/comment-label boilerplate (WM FABRIC GRADE
-	// B, Feet Options, Set of 4, ...) that dominates the raw overlap's
-	// denominator without carrying product identity. If cleaning empties
-	// either side — an edge case a stoplist misconfiguration could cause —
-	// fall back to the raw score rather than silently scoring 0.
-	cleanPOA := cleanTokenSet(vocab, combinedPOADesc(d))
-	cleanBC := cleanTokenSet(vocab, g.CombinedDesc)
+	// Cleaned score discounts boilerplate (WM FABRIC GRADE B, Feet Options,
+	// Set of 4, ...) that dominates the raw overlap's denominator without
+	// carrying product identity. Which tokens those are is not asserted by a
+	// list any more — vocab weights each token by how far it goes towards
+	// telling this PO's candidates apart (see vocab.go). If every token on
+	// either side turns out to be boilerplate there is no evidence to compute
+	// a similarity from, so fall back to the raw score rather than reporting a
+	// confident-looking 0.
+	cleanPOA := cleanTokenSet(poaText)
+	cleanBC := cleanTokenSet(g.CombinedDesc)
 	desc := descRaw
-	if len(cleanPOA) > 0 && len(cleanBC) > 0 {
-		desc = overlapSimilaritySets(cleanPOA, cleanBC)
+	if w, ok := weightedOverlap(vocab, cleanPOA, cleanBC); ok {
+		desc = w
 	}
 
 	// Exact-code identity. Ambiguity across BC groups is resolved afterwards
@@ -627,9 +541,11 @@ func scorePair(d OrderDetail, g BCLineGroup, vocab Vocab, mc MatchContext) LineM
 // once. Pairs are matched REGARDLESS of whether the money agrees — a price
 // discrepancy is reported on the match, not hidden by refusing to make one.
 //
-// mc.VendorNo (po.VendorNumber) selects the description vocabulary used to
-// clean both sides' text before scoring (vocab.go) and gates Vendor_Item_No
-// code matching to the PO's own vendor. mc.Items is CaseysItems enrichment
+// mc.VendorNo (po.VendorNumber) gates Vendor_Item_No code matching to the PO's
+// own vendor. Description token weights are not keyed by it: they are derived
+// from this document's own POA lines and BC groups (vocab.go), so a supplier
+// nobody has configured scores as well as one somebody has.
+// mc.Items is CaseysItems enrichment
 // keyed by item number — a group whose item has no entry (or mc.Items is
 // nil/empty because the lookup failed) gets Detail == nil and the pairing
 // falls back to v6.1 behaviour exactly.
@@ -638,7 +554,6 @@ func scorePair(d OrderDetail, g BCLineGroup, vocab Vocab, mc MatchContext) LineM
 // not infer permission to write from a non-empty matches slice.
 func MatchPOA(doc Products, bcLines []businesscentral.PurchaseOrderLine, mc MatchContext) (matches []LineMatch, unmatched []OrderDetail, unmatchedBC []BCLineGroup) {
 	groups := GroupBCLines(bcLines)
-	vocab := vocabFor(mc.VendorNo)
 
 	for i := range groups {
 		item, ok := mc.Items[groups[i].Item.LineObjectNumber]
@@ -651,10 +566,17 @@ func MatchPOA(doc Products, bcLines []businesscentral.PurchaseOrderLine, mc Matc
 		groups[i].CombinedDesc = buildCombinedDesc(groups[i])
 	}
 
+	// Range augmentation and token weights both come from this document's own
+	// candidates, so they must be derived AFTER the enrichment loop above
+	// rewrites CombinedDesc: Range_Code arrives with enrichment, and text the
+	// corpus never saw weights 1, which would score enrichment boilerplate as
+	// though it were distinctive.
+	poaTexts, vocab := prepareMatch(doc.Products, groups)
+
 	var all []LineMatch
 	for i, d := range doc.Products {
 		for _, g := range groups {
-			m := scorePair(d, g, vocab, mc)
+			m := scorePair(d, poaTexts[i], g, vocab, mc)
 			m.poaIndex = i
 			all = append(all, m)
 		}
@@ -665,6 +587,10 @@ func MatchPOA(doc Products, bcLines []businesscentral.PurchaseOrderLine, mc Matc
 	// CodeMatch value, and the bonus must land in Score before assign() sees
 	// it.
 	resolveCodeAmbiguity(all)
+	// After resolveCodeAmbiguity, so the two withdrawal reasons compose rather
+	// than race: a pairing already withdrawn for matching several BC groups is
+	// skipped here, and keeps the more specific explanation.
+	resolveVariantAmbiguity(all)
 	for i := range all {
 		if all[i].CodeMatch {
 			all[i].Score += codeMatchBonus
