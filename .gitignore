@@ -51,3 +51,6 @@ __tablestorage__/
 __azurite_db*__.json
 AzuriteConfig
 azure-func.zip
+# Captured fixtures hold real supplier orders (names, prices, BC IDs).
+# Keep them local; the README explains how to fill the corpus.
+testdata/orders/*.json
