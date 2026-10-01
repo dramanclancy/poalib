@@ -289,26 +289,30 @@ type SeatsCheckResult struct {
 	BCSeats  *float64 `json:"bcSeats"`
 	// DataState names why a comparison could not be made, for a report that
 	// wants to count the reasons apart rather than read the prose.
-	DataState string `json:"dataState"`
+	DataState SeatDataState `json:"dataState"`
 }
+
+// SeatDataState says why a seat comparison did or did not happen. Values are
+// printed in the workbook.
+type SeatDataState string
 
 // Seat-count data states. A report distinguishes these because they call for
 // different actions: one is a configuration problem, one is a transient
 // failure, one is a master-data gap, one is normal.
 const (
-	SeatsComparable       = "comparable"
-	SeatsEnrichmentOff    = "enrichment_not_run"
-	SeatsEnrichmentFailed = "enrichment_failed"
-	SeatsNoItemRecord     = "no_item_record"
-	SeatsNotOnItem        = "not_recorded_on_item"
-	SeatsImplausible      = "implausible_on_item"
-	SeatsNotOnPOA         = "not_stated_on_poa"
+	SeatsComparable       SeatDataState = "comparable"
+	SeatsEnrichmentOff    SeatDataState = "enrichment_not_run"
+	SeatsEnrichmentFailed SeatDataState = "enrichment_failed"
+	SeatsNoItemRecord     SeatDataState = "no_item_record"
+	SeatsNotOnItem        SeatDataState = "not_recorded_on_item"
+	SeatsImplausible      SeatDataState = "implausible_on_item"
+	SeatsNotOnPOA         SeatDataState = "not_stated_on_poa"
 	// SeatsFromDescription means the comparison WAS made, but BC's figure came
 	// from its own line description rather than the item record. The verdict
 	// is worth exactly as much; the item record is still missing data someone
 	// should fill in, and naming the source separately keeps that visible
 	// instead of letting a working check hide a master-data gap.
-	SeatsFromDescription = "comparable_from_description"
+	SeatsFromDescription SeatDataState = "comparable_from_description"
 )
 
 // seatCountRe matches "3STR", "3 STR", "3 SEATER", "2.5 SEATER" — the POA
@@ -345,7 +349,8 @@ func seatsCheck(poa POAProduct, bc BCProduct, state EnrichmentState, cfg Config)
 	// Why the ITEM RECORD had no usable figure, recorded rather than returned:
 	// BC's description may still be able to answer, and the reason only needs
 	// telling if it cannot.
-	var gap, gapMsg string
+	var gap SeatDataState
+	var gapMsg string
 	switch {
 	case !state.Ran():
 		gap = SeatsEnrichmentOff
@@ -472,10 +477,36 @@ type DescriptionCheckResult struct {
 	POACode string `json:"poaCode"`
 	// CodeDataState records what is actually known about BC's codes, so a
 	// message never blames master data for a lookup that never ran.
-	CodeDataState string `json:"codeDataState"`
+	CodeDataState CodeDataState `json:"codeDataState"`
 
 	Threshold       float64 `json:"threshold"`
 	MarginThreshold float64 `json:"marginThreshold"`
+}
+
+// CodeDataState is what is known about the codes BC holds for a product.
+// Values are printed in the workbook.
+type CodeDataState string
+
+const (
+	// CodeStateUnknown — the lookup never ran, failed, or returned no record:
+	// nothing can be said about BC's codes either way.
+	CodeStateUnknown CodeDataState = "unknown"
+	// CodeStateNotOnFile — BC's item record was read and holds neither a
+	// Vendor_Item_No nor a Model_No. The only state that is a master-data gap.
+	CodeStateNotOnFile CodeDataState = "no_code_on_file"
+	// CodeStateOnFile — BC holds a code the POA could have been matched on.
+	CodeStateOnFile CodeDataState = "code_on_file"
+)
+
+// lowSimilarityKind is the discrepancy a description score below threshold
+// raises. Only a confirmed absence of codes is blamed on master data: when
+// the lookup never ran, "BC code missing" would send someone to inspect a
+// field that may be perfectly populated.
+func (d DescriptionCheckResult) lowSimilarityKind() DiscrepancyKind {
+	if d.POACode != "" && d.CodeDataState == CodeStateNotOnFile {
+		return DiscMissingBCCode
+	}
+	return DiscDescription
 }
 
 // descriptionCheck decides whether the description evidence identifies the line.
@@ -507,11 +538,11 @@ func descriptionCheck(poa POAProduct, bc BCProduct, ev MatchEvidence, state Enri
 	}
 	switch {
 	case !known:
-		r.CodeDataState = "unknown"
+		r.CodeDataState = CodeStateUnknown
 	case note != "":
-		r.CodeDataState = "no_code_on_file"
+		r.CodeDataState = CodeStateNotOnFile
 	default:
-		r.CodeDataState = "code_on_file"
+		r.CodeDataState = CodeStateOnFile
 	}
 	r.CheckType = "description"
 
@@ -527,7 +558,7 @@ func descriptionCheck(poa POAProduct, bc BCProduct, ev MatchEvidence, state Enri
 		r.Message = "description similarity was not calculated for this line"
 	case *ev.Similarity < cfg.DescThreshold:
 		r.Status = StatusMismatch
-		_, r.Message = identityGap(r, bc, note)
+		r.Message = identityGap(r, note)
 	case !ev.MarginNA && ev.Margin < cfg.MarginThreshold:
 		r.Status = StatusMismatch
 		r.Message = fmt.Sprintf("ambiguous pairing: resembles %q almost equally (margin %.2f)", ev.RunnerUp, ev.Margin)
@@ -551,18 +582,16 @@ func descriptionCheck(poa POAProduct, bc BCProduct, ev MatchEvidence, state Enri
 // fix, once, for every future order.
 //
 // codeNote carries what codeStatus established, so this never claims BC holds
-// no code when nobody asked BC.
-func identityGap(r DescriptionCheckResult, bc BCProduct, codeNote string) (DiscrepancyKind, string) {
-	score := 0.0
-	if r.SimilarityScore != nil {
-		score = *r.SimilarityScore
-	}
+// no code when nobody asked BC. The discrepancy kind is lowSimilarityKind's
+// to decide, not this message's.
+func identityGap(r DescriptionCheckResult, codeNote string) string {
+	score := similarityValue(r.SimilarityScore)
 	if r.POACode != "" && codeNote != "" {
-		return DiscMissingBCCode, fmt.Sprintf(
+		return fmt.Sprintf(
 			"POA prints product code %q and %s, so there was no code to match it against (descriptions alone scored %.2f)",
 			r.POACode, codeNote, score)
 	}
-	return DiscDescription, fmt.Sprintf("descriptions look different (similarity %.2f)", score)
+	return fmt.Sprintf("descriptions look different (similarity %.2f)", score)
 }
 
 // ---------------------------------------------------------------------------

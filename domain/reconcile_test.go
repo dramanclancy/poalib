@@ -238,3 +238,39 @@ func TestReconcile_ConfigTravelsWithTheResult(t *testing.T) {
 		t.Errorf("the check reported threshold %g, want 0.42", r.Products[0].Description.Threshold)
 	}
 }
+
+// TestReconcile_PriceNeverDecidesPairingOnLargeOrders: above ExhaustiveLimit
+// the greedy assignment used to take pairs that passed every check first, so a
+// weaker description match whose price happened to agree beat the right line
+// — and "matched, but the price differs" became an unexpressible verdict on
+// exactly the orders big enough to need it. Both assignment paths must choose
+// the same pair, by identity alone.
+func TestReconcile_PriceNeverDecidesPairingOnLargeOrders(t *testing.T) {
+	poa := POAOrder{PF: "PF-GREEDY", Products: []POAProduct{product("Metro 3 Seater", 1, 500)}}
+	poa.Products[0].Embedding = []float32{1, 0}
+	bc := BCOrder{Enrichment: EnrichmentApplied, Products: []BCProduct{
+		bcProduct("bc-1", "IT1", "Metro 3 Seater", 1, 450, 450), // identical text, wrong price
+		bcProduct("bc-2", "IT2", "Metro 3 Seater", 1, 500, 500), // weaker text, right price
+	}}
+	bc.Products[0].Embedding = []float32{1, 0}     // similarity 1.0
+	bc.Products[1].Embedding = []float32{0.8, 0.6} // similarity 0.8
+
+	for _, limit := range []int{8, 1} { // exhaustive, then greedy
+		c := cfg()
+		c.ExhaustiveLimit = limit
+		// Low enough that the weaker line passes the description check on its
+		// own, which is what let the old greedy order prefer it.
+		c.MarginThreshold = -1
+
+		r := Reconcile(poa, bc, c)
+		if len(r.Products) != 1 {
+			t.Fatalf("limit %d: %d pairs, want 1", limit, len(r.Products))
+		}
+		if got := r.Products[0].BCIndex; got != 0 {
+			t.Errorf("limit %d: paired with BC line %d, want 0 — the price chose the pair", limit, got)
+		}
+		if !r.Products[0].Price.Failed() {
+			t.Errorf("limit %d: the price difference was not reported", limit)
+		}
+	}
+}

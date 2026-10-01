@@ -40,7 +40,7 @@ func TestSeatsCheck_DistinguishesWhyItCannotCompare(t *testing.T) {
 		name  string
 		bc    BCProduct
 		state EnrichmentState
-		want  string
+		want  SeatDataState
 	}{
 		{
 			name:  "enrichment never ran",
@@ -266,6 +266,16 @@ func TestIdentityGap_DoesNotClaimBCIsMissingDataWhenNobodyAsked(t *testing.T) {
 	}
 	if !strings.Contains(ran.Message, "no Vendor_Item_No") {
 		t.Errorf("message = %q; when the lookup did run, the master-data gap is the point", ran.Message)
+	}
+
+	// The kind is printed in the workbook and counted by any flag-rate
+	// metric, so it has to be as honest as the message. It used to read
+	// bc_code_missing whenever the state was anything but code_on_file.
+	if k := notRun.lowSimilarityKind(); k != DiscDescription {
+		t.Errorf("kind with the lookup not run = %q, want %q", k, DiscDescription)
+	}
+	if k := ran.lowSimilarityKind(); k != DiscMissingBCCode {
+		t.Errorf("kind with the lookup run and no code on file = %q, want %q", k, DiscMissingBCCode)
 	}
 }
 

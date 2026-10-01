@@ -250,14 +250,23 @@ func greedyAssign(candidates []ProductResult) []ProductResult {
 	return out
 }
 
-// sortCandidates orders pairings best-first: ones where every check passes,
-// then by identity score. greedyAssign depends on this order.
+// sortCandidates orders pairings best-first by identity score alone, ties
+// going to the lowest line positions. greedyAssign depends on this order.
+//
+// It used to put pairs that passed every check first. OK() includes price, so
+// above ExhaustiveLimit a pair whose money happened to agree beat a better
+// description match — price deciding identity, on large orders only, while
+// the exhaustive search below the limit maximised score alone. Both paths now
+// pursue the same objective.
 func sortCandidates(candidates []ProductResult) {
 	sort.Slice(candidates, func(i, j int) bool {
-		oi, oj := candidates[i].OK(), candidates[j].OK()
-		if oi != oj {
-			return oi
+		a, b := candidates[i], candidates[j]
+		if a.score != b.score {
+			return a.score > b.score
 		}
-		return candidates[i].score > candidates[j].score
+		if a.POAIndex != b.POAIndex {
+			return a.POAIndex < b.POAIndex
+		}
+		return a.BCIndex < b.BCIndex
 	})
 }

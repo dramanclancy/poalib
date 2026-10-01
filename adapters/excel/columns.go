@@ -235,7 +235,7 @@ func matchColumns(cfg domain.Config) []column {
 			Source:   "Whether item enrichment ran for this order, and what it returned for this item.",
 			Calc:     "\"code_on_file\" — BC holds at least one code. \"no_code_on_file\" — enrichment ran and the item has neither. \"unknown\" — enrichment did not run or failed, so nothing can be said either way.",
 			Decision: "Prevents the report blaming missing master data for a lookup that never happened. Only \"no_code_on_file\" is a genuine master-data gap worth acting on.",
-			Value:    func(m domain.ProductResult) any { return m.Description.CodeDataState },
+			Value:    func(m domain.ProductResult) any { return string(m.Description.CodeDataState) },
 		},
 		{
 			Header:   "POA Code Candidate",
@@ -316,7 +316,7 @@ func matchColumns(cfg domain.Config) []column {
 			Source:   "The enrichment state of the order, the item's record, and which source supplied BC's figure.",
 			Calc:     "comparable; comparable_from_description; enrichment_not_run; enrichment_failed; no_item_record; not_recorded_on_item; implausible_on_item; not_stated_on_poa.",
 			Decision: "Distinguishes a master-data gap (BC has no seat count for a real item) from a configuration problem (enrichment did not run at all). Only the first is worth someone's time in Business Central. comparable_from_description means the check did run, but on the seat count in BC's line description because the item record had none — the verdict is sound and the master-data gap is still real.",
-			Value:    func(m domain.ProductResult) any { return m.Seats.DataState },
+			Value:    func(m domain.ProductResult) any { return string(m.Seats.DataState) },
 		},
 		{
 			Header:   "POA Seats",

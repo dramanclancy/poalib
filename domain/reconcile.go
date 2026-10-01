@@ -138,11 +138,7 @@ func (p ProductResult) identityDiscrepancies() []Discrepancy {
 		if similarityValue(d.SimilarityScore) < d.Threshold {
 			// The message the check already reached, rather than a second
 			// wording maintained alongside it.
-			kind := DiscDescription
-			if d.POACode != "" && d.CodeDataState != "code_on_file" {
-				kind = DiscMissingBCCode
-			}
-			add(kind, d.Message)
+			add(d.lowSimilarityKind(), d.Message)
 		}
 		if d.Margin != nil && *d.Margin < d.MarginThreshold {
 			add(DiscAmbiguousPairing, fmt.Sprintf(
