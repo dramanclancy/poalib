@@ -1,0 +1,5 @@
+# Go source is LF everywhere: gofmt writes LF, and a CRLF checkout makes
+# gofmt -l report every file as unformatted.
+*.go text eol=lf
+go.mod text eol=lf
+go.sum text eol=lf

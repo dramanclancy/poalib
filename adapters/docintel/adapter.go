@@ -24,8 +24,8 @@ type Scanner struct {
 
 // Scan analyses pdf with the supplier's custom model and extracts one
 // POAOrder per purchase order the file acknowledges.
-func (s *Scanner) Scan(_ context.Context, pdf []byte, modelID string) ([]domain.POAOrder, error) {
-	result, err := s.Client.AnalyzeDocumentFromBytes(modelID, pdf)
+func (s *Scanner) Scan(ctx context.Context, pdf []byte, modelID string) ([]domain.POAOrder, error) {
+	result, err := s.Client.AnalyzeDocumentFromBytes(ctx, modelID, pdf)
 	if err != nil {
 		return nil, err
 	}

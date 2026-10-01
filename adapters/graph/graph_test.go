@@ -3,6 +3,7 @@
 package graph
 
 import (
+	"context"
 	"os"
 	"path/filepath"
 	"testing"
@@ -47,7 +48,7 @@ func TestGetDefaultDriveID(t *testing.T) {
 		t.Skip("skipping: SHAREPOINT_SITE_ID not set")
 	}
 
-	driveID, err := g.GetDefaultDriveID(siteID)
+	driveID, err := g.GetDefaultDriveID(context.Background(), siteID)
 	if err != nil {
 		t.Fatalf("GetDefaultDriveID returned error: %v", err)
 	}
@@ -62,13 +63,13 @@ func TestGetItemByPath(t *testing.T) {
 		t.Skip("skipping: SHAREPOINT_SITE_ID not set")
 	}
 
-	driveID, err := g.GetDefaultDriveID(siteID)
+	driveID, err := g.GetDefaultDriveID(context.Background(), siteID)
 	if err != nil {
 		t.Fatalf("GetDefaultDriveID returned error: %v", err)
 	}
 	path := "POA"
 
-	output, err := g.GetItemByPath(driveID, path)
+	output, err := g.GetItemByPath(context.Background(), driveID, path)
 	if err != nil {
 		t.Fatalf("GetItemByPath: %v", err)
 	}

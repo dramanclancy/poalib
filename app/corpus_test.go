@@ -164,7 +164,13 @@ func loadCorpus(t *testing.T) []Fixture {
 		t.Fatalf("loading fixtures from %s: %v", dir, err)
 	}
 	if len(fixtures) == 0 {
-		t.Skipf("no fixtures in %s — run the service with CAPTURE_FIXTURES=true and copy the JSON files there", dir)
+		// A skip reads as "ok", which on a machine without the corpus is a
+		// pass that checked nothing. Where the corpus is supposed to be
+		// present, set POA_REQUIRE_CORPUS=1 and its absence fails instead.
+		if os.Getenv("POA_REQUIRE_CORPUS") != "" {
+			t.Fatalf("POA_REQUIRE_CORPUS is set but %s holds no fixtures", dir)
+		}
+		t.Skipf("no fixtures in %s — run the service with CAPTURE_FIXTURES=true and copy the JSON files there (set POA_REQUIRE_CORPUS=1 to make this a failure)", dir)
 	}
 	return fixtures
 }

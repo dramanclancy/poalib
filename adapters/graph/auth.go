@@ -1,4 +1,4 @@
-// Package msgraph wraps Microsoft Graph auth and SharePoint file I/O.
+// Package graph wraps Microsoft Graph auth and SharePoint file I/O.
 package graph
 
 import (

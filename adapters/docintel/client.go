@@ -1,11 +1,12 @@
 // Package docintel is a generic Azure Document Intelligence client: submit a
 // document, poll until analysis completes, get back the raw field/value
 // shapes. It has no knowledge of POA (or any other) document layout — that
-// parsing lives in package poa.
+// parsing lives in adapter.go.
 package docintel
 
 import (
 	"bytes"
+	"context"
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
@@ -70,17 +71,20 @@ func NewDocIntelClient(endpoint, key string) (*DocIntelClient, error) {
 
 // AnalyzeDocumentFromBytes analyzes raw document bytes (e.g. a PDF downloaded
 // from SharePoint via DownloadContentByPath).
-func (c *DocIntelClient) AnalyzeDocumentFromBytes(modelID string, data []byte) (*AnalyzeResult, error) {
+//
+// ctx bounds the whole analysis, polling included: a caller that has gone
+// away stops it rather than leaving it running for up to two minutes.
+func (c *DocIntelClient) AnalyzeDocumentFromBytes(ctx context.Context, modelID string, data []byte) (*AnalyzeResult, error) {
 	if len(data) == 0 {
 		return nil, fmt.Errorf("docintel: empty document")
 	}
-	return c.analyze(modelID, map[string]string{
+	return c.analyze(ctx, modelID, map[string]string{
 		"base64Source": base64.StdEncoding.EncodeToString(data),
 	})
 }
 
 // analyze submits the job, then polls the Operation-Location until completion.
-func (c *DocIntelClient) analyze(modelID string, source map[string]string) (*AnalyzeResult, error) {
+func (c *DocIntelClient) analyze(ctx context.Context, modelID string, source map[string]string) (*AnalyzeResult, error) {
 	submitURL := fmt.Sprintf(
 		"%s/documentintelligence/documentModels/%s:analyze?api-version=%s",
 		c.endpoint, modelID, docIntelAPIVersion,
@@ -91,7 +95,7 @@ func (c *DocIntelClient) analyze(modelID string, source map[string]string) (*Ana
 		return nil, fmt.Errorf("docintel: marshal request: %w", err)
 	}
 
-	req, err := http.NewRequest(http.MethodPost, submitURL, bytes.NewReader(body))
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, submitURL, bytes.NewReader(body))
 	if err != nil {
 		return nil, fmt.Errorf("docintel: build request: %w", err)
 	}
@@ -118,19 +122,23 @@ func (c *DocIntelClient) analyze(modelID string, source map[string]string) (*Ana
 		return nil, fmt.Errorf("docintel: no Operation-Location header in response")
 	}
 
-	return c.pollOperation(opURL)
+	return c.pollOperation(ctx, opURL)
 }
 
-func (c *DocIntelClient) pollOperation(opURL string) (*AnalyzeResult, error) {
+func (c *DocIntelClient) pollOperation(ctx context.Context, opURL string) (*AnalyzeResult, error) {
 	const (
 		pollInterval = 2 * time.Second
 		maxAttempts  = 60 // ~2 minutes
 	)
 
 	for attempt := 0; attempt < maxAttempts; attempt++ {
-		time.Sleep(pollInterval)
+		select {
+		case <-ctx.Done():
+			return nil, fmt.Errorf("docintel: analysis abandoned: %w", ctx.Err())
+		case <-time.After(pollInterval):
+		}
 
-		req, err := http.NewRequest(http.MethodGet, opURL, nil)
+		req, err := http.NewRequestWithContext(ctx, http.MethodGet, opURL, nil)
 		if err != nil {
 			return nil, fmt.Errorf("docintel: build poll request: %w", err)
 		}
@@ -139,6 +147,15 @@ func (c *DocIntelClient) pollOperation(opURL string) (*AnalyzeResult, error) {
 		resp, err := c.http.Do(req)
 		if err != nil {
 			return nil, fmt.Errorf("docintel: poll: %w", err)
+		}
+
+		// Throttling and server errors are worth another poll; any other
+		// failure status will not fix itself, and decoding its body as an
+		// operation would only read as "still running" until the attempts ran
+		// out.
+		if resp.StatusCode >= 400 && resp.StatusCode != http.StatusTooManyRequests && resp.StatusCode < 500 {
+			resp.Body.Close()
+			return nil, fmt.Errorf("docintel: poll returned %d", resp.StatusCode)
 		}
 
 		var op analyzeOperation

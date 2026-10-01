@@ -27,7 +27,7 @@ func pathURL(driveID string, itemPath string, suffix string) string {
 
 // GetDefaultDriveID returns the ID of the site's default document library.
 // Fluent chain — ID-based addressing, with $select to fetch only what we use.
-func (g *GraphAuth) GetDefaultDriveID(siteID string) (string, error) {
+func (g *GraphAuth) GetDefaultDriveID(ctx context.Context, siteID string) (string, error) {
 	query := sites.ItemDriveRequestBuilderGetQueryParameters{
 		Select: []string{"id"},
 	}
@@ -36,7 +36,7 @@ func (g *GraphAuth) GetDefaultDriveID(siteID string) (string, error) {
 		Sites().
 		BySiteId(siteID).
 		Drive().
-		Get(context.Background(),
+		Get(ctx,
 			&sites.ItemDriveRequestBuilderGetRequestConfiguration{
 				QueryParameters: &query,
 			})
@@ -51,7 +51,7 @@ func (g *GraphAuth) GetDefaultDriveID(siteID string) (string, error) {
 
 // GetItemByPath returns a drive item's metadata, addressed by path relative to the drive root.
 // Raw URL — path addressing has no fluent equivalent in the Go SDK.
-func (g *GraphAuth) GetItemByPath(driveID string, itemPath string) (models.DriveItemable, error) {
+func (g *GraphAuth) GetItemByPath(ctx context.Context, driveID string, itemPath string) (models.DriveItemable, error) {
 	query := drives.ItemItemsDriveItemItemRequestBuilderGetQueryParameters{
 		Select: []string{"id", "name", "size", "file", "folder", "webUrl"},
 	}
@@ -61,7 +61,7 @@ func (g *GraphAuth) GetItemByPath(driveID string, itemPath string) (models.Drive
 		g.appClient.GetAdapter(),
 	)
 
-	return builder.Get(context.Background(),
+	return builder.Get(ctx,
 		&drives.ItemItemsDriveItemItemRequestBuilderGetRequestConfiguration{
 			QueryParameters: &query,
 		})
@@ -69,11 +69,11 @@ func (g *GraphAuth) GetItemByPath(driveID string, itemPath string) (models.Drive
 
 // DownloadContentByPath returns the raw bytes of a file, addressed by path.
 // Raw URL — path addressing. No query parameters: /content returns the byte stream.
-func (g *GraphAuth) DownloadContentByPath(driveID string, itemPath string) ([]byte, error) {
+func (g *GraphAuth) DownloadContentByPath(ctx context.Context, driveID string, itemPath string) ([]byte, error) {
 	builder := drives.NewItemItemsItemContentRequestBuilder(
 		pathURL(driveID, itemPath, "/content"),
 		g.appClient.GetAdapter(),
 	)
 
-	return builder.Get(context.Background(), nil)
+	return builder.Get(ctx, nil)
 }

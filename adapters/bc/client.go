@@ -1,4 +1,5 @@
-// Package businesscentral calls the Business Central API v2.0.
+// Package bc calls the Business Central API v2.0 and the CaseysItems OData v4
+// page, and translates both into the domain.
 package bc
 
 import (
@@ -11,12 +12,21 @@ import (
 	"net/http"
 	"net/url"
 	"strings"
+	"time"
 
 	"github.com/Azure/azure-sdk-for-go/sdk/azcore"
 	"github.com/Azure/azure-sdk-for-go/sdk/azcore/policy"
 )
 
 const bcScope = "https://api.businesscentral.dynamics.com/.default"
+
+// requestTimeout bounds one Business Central call. http.DefaultClient has no
+// timeout at all, so a stalled connection held a Functions worker until the
+// host killed the whole invocation. A purchase order with its lines expanded
+// is the slowest query made, and comfortably inside this.
+const requestTimeout = 60 * time.Second
+
+func newHTTPClient() *http.Client { return &http.Client{Timeout: requestTimeout} }
 
 // ErrPurchaseOrderNotFound reports that the query succeeded and matched
 // nothing. Callers branch on it to retry with a different order number; every
@@ -50,7 +60,7 @@ func NewBCClient(cred azcore.TokenCredential, tenantID, environment, companyID s
 	return &BCClient{
 		cred:       cred,
 		baseURL:    base,
-		httpClient: http.DefaultClient,
+		httpClient: newHTTPClient(),
 	}, nil
 
 }

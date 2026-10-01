@@ -12,7 +12,7 @@ import (
 // TestCaseysClient_GetItemsByNumbers_TransportFailureReturnsError guards the
 // same failure mode client_test.go covers for BCClient: a network failure
 // (DNS, timeout, connection refused) must come back as an error, never a
-// panic, so poa.Reconcile's degrade-to-Phase-1 path actually gets a chance
+// panic, so Source.enrich's degrade-without-enrichment path actually gets a chance
 // to run instead of the whole request blowing up.
 func TestCaseysClient_GetItemsByNumbers_TransportFailureReturnsError(t *testing.T) {
 	c := &CaseysClient{
