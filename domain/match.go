@@ -118,35 +118,19 @@ func cosineSimilarity(a, b []float32) float64 {
 	return dot / (math.Sqrt(magA) * math.Sqrt(magB))
 }
 
-func similarityValue(p *float64) float64 {
-	if p == nil {
-		return 0
-	}
-	return *p
-}
-
 // ---------------------------------------------------------------------------
 // Margins
 // ---------------------------------------------------------------------------
 
-// fillMargins computes each pairing's lead over the best alternative its POA
-// product could still have had, in place.
-//
-// available decides which BC products count as alternatives. Before assignment
-// every product is an alternative, since none is spoken for. Afterwards only
-// the unassigned ones are — a line reported as "resembles IT0226779 almost
-// equally" when IT0226779 was taken by another POA line describes a contest
-// that never happened, which is what the 2026-09-04 batch showed on PF130365
-// as a negative margin.
-func fillMargins(all []pairing, available func(bcIndex int) bool) {
-	for i := range all {
-		all[i].ev = marginEvidence(all, all[i], available)
-	}
-}
-
 // marginEvidence returns p's evidence with its margin recomputed against the
 // BC products available to p's POA line, other than p's own. Only the margin
 // fields change; similarity and code evidence are carried over as they are.
+//
+// available decides which BC products count as alternatives: only the ones
+// still unassigned. A line reported as "resembles IT0226779 almost equally"
+// when IT0226779 was taken by another POA line describes a contest that never
+// happened, which is what the 2026-09-04 batch showed on PF130365 as a
+// negative margin.
 func marginEvidence(all []pairing, p pairing, available func(bcIndex int) bool) MatchEvidence {
 	ev := p.ev
 	best, bestLabel, found := -1.0, "", false
@@ -155,7 +139,7 @@ func marginEvidence(all []pairing, p pairing, available func(bcIndex int) bool) 
 			continue
 		}
 		found = true
-		if s := similarityValue(q.ev.Similarity); s > best {
+		if s := orZero(q.ev.Similarity); s > best {
 			best, bestLabel = s, q.bc.Label()
 		}
 	}
@@ -164,7 +148,7 @@ func marginEvidence(all []pairing, p pairing, available func(bcIndex int) bool) 
 		return ev
 	}
 	ev.MarginNA = false
-	ev.Margin = similarityValue(ev.Similarity) - best
+	ev.Margin = orZero(ev.Similarity) - best
 	ev.RunnerUp = bestLabel
 	return ev
 }
@@ -195,24 +179,23 @@ func pairIndex(all []pairing) map[[2]int]pairing {
 // both sides spend the same number of lines on a product. findGroups, in
 // group.go, repairs what it gets wrong afterwards rather than complicating the
 // search here.
-func assign(candidates []ProductResult, nPOA, nBC int, cfg Config) []ProductResult {
+//
+// It reads only the identity score. No check has run yet, and none needs to:
+// which pairs are chosen must not depend on whether their money agrees.
+func assign(pairs []pairing, nPOA, nBC int, cfg Config) []link {
 	if nPOA > cfg.ExhaustiveLimit || nBC > cfg.ExhaustiveLimit {
-		return greedyAssign(candidates)
+		return greedyAssign(pairs)
 	}
 
-	byPair := make(map[[2]int]ProductResult, len(candidates))
-	for _, c := range candidates {
-		byPair[[2]int{c.POAIndex, c.BCIndex}] = c
-	}
-
-	var bestSet []ProductResult
+	at := pairIndex(pairs)
+	var best []link
 	bestScore := -1.0
-	var walk func(poa int, usedBC map[int]bool, cur []ProductResult, score float64)
-	walk = func(poa int, usedBC map[int]bool, cur []ProductResult, score float64) {
+	var walk func(poa int, usedBC map[int]bool, cur []link, score float64)
+	walk = func(poa int, usedBC map[int]bool, cur []link, score float64) {
 		if poa == nPOA {
 			if score > bestScore {
 				bestScore = score
-				bestSet = append([]ProductResult(nil), cur...)
+				best = append([]link(nil), cur...)
 			}
 			return
 		}
@@ -222,51 +205,49 @@ func assign(candidates []ProductResult, nPOA, nBC int, cfg Config) []ProductResu
 			if usedBC[bi] {
 				continue
 			}
-			c, ok := byPair[[2]int{poa, bi}]
+			p, ok := at[[2]int{poa, bi}]
 			if !ok {
 				continue
 			}
 			usedBC[bi] = true
-			walk(poa+1, usedBC, append(cur, c), score+c.score)
+			walk(poa+1, usedBC, append(cur, link{poa: poa, bc: bi}), score+p.score)
 			delete(usedBC, bi)
 		}
 	}
 	walk(0, map[int]bool{}, nil, 0)
-	return bestSet
+	return best
 }
 
-// greedyAssign takes candidates in the order given — best first — and keeps
-// the first pairing it sees for each POA and BC product.
-func greedyAssign(candidates []ProductResult) []ProductResult {
-	var out []ProductResult
-	usedPOA, usedBC := map[int]bool{}, map[int]bool{}
-	for _, c := range candidates {
-		if usedPOA[c.POAIndex] || usedBC[c.BCIndex] {
-			continue
-		}
-		usedPOA[c.POAIndex], usedBC[c.BCIndex] = true, true
-		out = append(out, c)
-	}
-	return out
-}
-
-// sortCandidates orders pairings best-first by identity score alone, ties
-// going to the lowest line positions. greedyAssign depends on this order.
+// greedyAssign takes pairings best-first by identity score, ties going to the
+// lowest line positions, and keeps the first it sees for each POA and BC
+// product.
 //
-// It used to put pairs that passed every check first. OK() includes price, so
-// above ExhaustiveLimit a pair whose money happened to agree beat a better
+// It used to take pairs that passed every check first. OK() includes price,
+// so above ExhaustiveLimit a pair whose money happened to agree beat a better
 // description match — price deciding identity, on large orders only, while
 // the exhaustive search below the limit maximised score alone. Both paths now
 // pursue the same objective.
-func sortCandidates(candidates []ProductResult) {
-	sort.Slice(candidates, func(i, j int) bool {
-		a, b := candidates[i], candidates[j]
+func greedyAssign(pairs []pairing) []link {
+	sorted := append([]pairing(nil), pairs...)
+	sort.Slice(sorted, func(i, j int) bool {
+		a, b := sorted[i], sorted[j]
 		if a.score != b.score {
 			return a.score > b.score
 		}
-		if a.POAIndex != b.POAIndex {
-			return a.POAIndex < b.POAIndex
+		if a.poaIndex != b.poaIndex {
+			return a.poaIndex < b.poaIndex
 		}
-		return a.BCIndex < b.BCIndex
+		return a.bcIndex < b.bcIndex
 	})
+
+	var out []link
+	usedPOA, usedBC := map[int]bool{}, map[int]bool{}
+	for _, p := range sorted {
+		if usedPOA[p.poaIndex] || usedBC[p.bcIndex] {
+			continue
+		}
+		usedPOA[p.poaIndex], usedBC[p.bcIndex] = true, true
+		out = append(out, link{poa: p.poaIndex, bc: p.bcIndex})
+	}
+	return out
 }

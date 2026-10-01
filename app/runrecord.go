@@ -32,6 +32,11 @@ type RunRecord struct {
 	OrderNumberUsed string `json:"orderNumberUsed,omitempty"`
 	BCLinesFetched  int    `json:"bcLinesFetched"`
 	BCProductsBuilt int    `json:"bcProductsBuilt"`
+
+	ItemNamesRequested int    `json:"itemNamesRequested"`
+	ItemNamesReturned  int    `json:"itemNamesReturned"`
+	ItemNamesError     string `json:"itemNamesError,omitempty"`
+
 	EnrichmentState string `json:"enrichmentState"`
 	EnrichmentAsked bool   `json:"enrichmentAsked"`
 	ItemsRequested  int    `json:"itemsRequested"`
@@ -83,6 +88,11 @@ func (r RunRecord) Degradations() []string {
 		if r.ItemsWithCodes == 0 {
 			out = append(out, "No returned item carried a Vendor_Item_No or Model_No, so exact-code identity was unavailable on every line.")
 		}
+	}
+	// Only a failed lookup counts. An item number BC holds no record for is
+	// reported on the Summary sheet but is a data fact, not a degraded run.
+	if r.ItemNamesError != "" {
+		out = append(out, fmt.Sprintf("Item names could not be fetched for every line (%s): those lines were compared on the purchase order line's own text instead of the item name.", r.ItemNamesError))
 	}
 	if r.EmbeddingModel == "" {
 		out = append(out, "No embedding provider was recorded for this run; description similarity may not be comparable with other runs.")

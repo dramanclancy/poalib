@@ -35,8 +35,15 @@ func (s *Source) Order(ctx context.Context, pf string) (domain.BCOrder, app.Orde
 	if err != nil {
 		return domain.BCOrder{}, stats, err
 	}
-	lines := s.Orders.EnhancePurchaseOrderLines(ctx, po.PurchaseOrderLines)
+	lines, names := s.Orders.EnhancePurchaseOrderLines(ctx, po.PurchaseOrderLines)
 	stats.LinesFetched = len(lines)
+	stats.ItemNamesRequested, stats.ItemNamesReturned = names.Requested, names.Returned
+	if names.Err != nil {
+		stats.ItemNamesError = names.Err.Error()
+		if s.Log != nil {
+			s.Log("item name lookup failed for %s, those lines compare on their own text: %s", pf, names.Err)
+		}
+	}
 
 	order := domain.BCOrder{
 		PF:         po.Number,

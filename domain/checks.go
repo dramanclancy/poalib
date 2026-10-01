@@ -35,9 +35,23 @@ const (
 	StatusUnknown CheckStatus = "unknown"
 )
 
+// CheckType names which check produced a result. Values appear in fixtures
+// and the corpus test's output.
+type CheckType string
+
+const (
+	CheckPrice       CheckType = "price"
+	CheckQuantity    CheckType = "quantity"
+	CheckArithmetic  CheckType = "arithmetic"
+	CheckOrientation CheckType = "orientation"
+	CheckSeats       CheckType = "seats"
+	CheckDescription CheckType = "description"
+	CheckTotals      CheckType = "totals"
+)
+
 // CheckResult is what every check returns, whatever it checked.
 type CheckResult struct {
-	CheckType string      `json:"checkType"`
+	CheckType CheckType   `json:"checkType"`
 	Status    CheckStatus `json:"status"`
 	Message   string      `json:"message"`
 }
@@ -74,7 +88,7 @@ func priceCheck(poa POAProduct, bc BCProduct, cfg Config) PriceCheckResult {
 		POAUnitPrice: poa.UnitPrice, BCUnitPrice: bc.UnitCost,
 		Tolerance: cfg.MoneyTolerance,
 	}
-	r.CheckType = "price"
+	r.CheckType = CheckPrice
 	if math.Abs(diff) < cfg.MoneyTolerance {
 		r.Status = StatusMatch
 		r.Message = fmt.Sprintf("net line value agrees (%.2f)", poa.Net())
@@ -119,7 +133,7 @@ type QuantityCheckResult struct {
 func quantityCheck(poa POAProduct, bc BCProduct) QuantityCheckResult {
 	pq, bq := float64(poa.Qty), bc.Qty
 	r := QuantityCheckResult{POAQty: pq, BCQty: bq}
-	r.CheckType = "quantity"
+	r.CheckType = CheckQuantity
 
 	switch ratio, parts := packRatio(poa, bc), partsRatio(poa, bc); {
 	case ratio == 1:
@@ -199,7 +213,7 @@ type ArithmeticCheckResult struct {
 // broken document, worth saying separately from any disagreement with the order.
 func arithmeticCheck(poa POAProduct, cfg Config) ArithmeticCheckResult {
 	r := ArithmeticCheckResult{Net: poa.Net(), PrintedLineTotal: poa.LineTotal}
-	r.CheckType = "arithmetic"
+	r.CheckType = CheckArithmetic
 
 	printed, ok := Deref(poa.LineTotal)
 	if !ok {
@@ -252,7 +266,7 @@ func orientationCheck(poa POAProduct, bc BCProduct) OrientationCheckResult {
 		BCOrientation:  bcOrient.String(),
 		BCSource:       bcSrc,
 	}
-	r.CheckType = "orientation"
+	r.CheckType = CheckOrientation
 
 	switch {
 	case poaOrient == OrientUnknown && bcOrient == OrientUnknown:
@@ -343,7 +357,7 @@ func extractSeatCount(s string) (float64, bool) {
 // distinguish those two cases — which is what this state machine fixes.
 func seatsCheck(poa POAProduct, bc BCProduct, state EnrichmentState, cfg Config) SeatsCheckResult {
 	r := SeatsCheckResult{}
-	r.CheckType = "seats"
+	r.CheckType = CheckSeats
 	r.Status = StatusUnknown
 
 	// Why the ITEM RECORD had no usable figure, recorded rather than returned:
@@ -473,7 +487,8 @@ type DescriptionCheckResult struct {
 	VariantAmbiguity  string `json:"variantAmbiguity"`
 
 	// POACode is the product code found in the POA's own text, whether or not
-	// it matched — the lookup key a rules table would use.
+	// it matched — what the missing-code message quotes, and the value to add
+	// as the BC item's Vendor_Item_No.
 	POACode string `json:"poaCode"`
 	// CodeDataState records what is actually known about BC's codes, so a
 	// message never blames master data for a lookup that never ran.
@@ -544,7 +559,7 @@ func descriptionCheck(poa POAProduct, bc BCProduct, ev MatchEvidence, state Enri
 	default:
 		r.CodeDataState = CodeStateOnFile
 	}
-	r.CheckType = "description"
+	r.CheckType = CheckDescription
 
 	switch {
 	case ev.CodeMatch:
@@ -585,7 +600,7 @@ func descriptionCheck(poa POAProduct, bc BCProduct, ev MatchEvidence, state Enri
 // no code when nobody asked BC. The discrepancy kind is lowSimilarityKind's
 // to decide, not this message's.
 func identityGap(r DescriptionCheckResult, codeNote string) string {
-	score := similarityValue(r.SimilarityScore)
+	score := orZero(r.SimilarityScore)
 	if r.POACode != "" && codeNote != "" {
 		return fmt.Sprintf(
 			"POA prints product code %q and %s, so there was no code to match it against (descriptions alone scored %.2f)",
@@ -638,7 +653,7 @@ func totalsCheck(poa POAOrder, bc BCOrder, matched []ProductResult, unmatched []
 		MatchedTotal: matchedTotal, LinesMatched: len(matched), LinesUnmatched: len(unmatched),
 		Tolerance: cfg.OrderTolerance,
 	}
-	r.CheckType = "totals"
+	r.CheckType = CheckTotals
 	if math.Abs(diff) < cfg.OrderTolerance {
 		r.Status = StatusMatch
 		r.Message = fmt.Sprintf("order total agrees (%.2f, %s)", total, source)

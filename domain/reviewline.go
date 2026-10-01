@@ -74,8 +74,8 @@ func (r Result) reviewLine(p ProductResult) ReviewLine {
 		POALineIndex:     p.POAIndex,
 		EngineVersion:    EngineVersion,
 		LineGroup:        groupText(p.Group),
-		DescScore:        similarityValue(p.Description.SimilarityScore),
-		DescMargin:       optional(p.Description.Margin),
+		DescScore:        orZero(p.Description.SimilarityScore),
+		DescMargin:       orZero(p.Description.Margin),
 		CodeMatchSource:  p.Description.CodeMatchSource,
 		CodeDataState:    string(p.Description.CodeDataState),
 		POACodeCandidate: p.Description.POACode,
@@ -85,15 +85,6 @@ func (r Result) reviewLine(p ProductResult) ReviewLine {
 		POANet:           p.Price.POAPrice,
 		BCNet:            p.Price.BCPrice,
 	}
-}
-
-// optional flattens an absent number to 0 for a sheet row, where a numeric
-// column has to hold something. The typed result keeps the nil.
-func optional(p *float64) float64 {
-	if p == nil {
-		return 0
-	}
-	return *p
 }
 
 func groupText(g *LineGroup) string {

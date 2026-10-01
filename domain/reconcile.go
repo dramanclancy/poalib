@@ -46,8 +46,6 @@ type ProductResult struct {
 	// Score is the identity score the assignment maximised. Reported for
 	// debugging; nothing branches on it.
 	Score float64 `json:"score"`
-
-	score float64
 }
 
 // checkProduct runs every check on one pairing.
@@ -64,7 +62,6 @@ func checkProduct(p pairing, state EnrichmentState, cfg Config) ProductResult {
 		POAIndex:    p.poaIndex,
 		BCIndex:     p.bcIndex,
 		Score:       p.score,
-		score:       p.score,
 	}
 }
 
@@ -95,12 +92,11 @@ func (p ProductResult) OK() bool {
 // Discrepancies lists every reason this pair needs a human, one entry per
 // reason.
 //
-// Separate entries, not one joined sentence: a reviewer approving
-// "descriptions look different; net differs by £24" has pardoned both, and one
-// of those must never be pardonable. Each carries a Kind rather than only
-// prose, because whatever records a verdict has to know whether it may become
-// a rule — deciding that by matching English breaks the first time anyone
-// rewords a message.
+// Separate entries, not one joined sentence: "descriptions look different;
+// net differs by £24" is two problems with two different fixes, and the Review
+// sheet gives each its own row. Each carries a Kind rather than only prose, so
+// a reader can filter or count by kind without matching English that anyone
+// may reword.
 func (p ProductResult) Discrepancies() []Discrepancy {
 	var ds []Discrepancy
 	add := func(k DiscrepancyKind, msg string) { ds = append(ds, Discrepancy{Kind: k, Message: msg}) }
@@ -135,7 +131,7 @@ func (p ProductResult) identityDiscrepancies() []Discrepancy {
 	add := func(k DiscrepancyKind, msg string) { ds = append(ds, Discrepancy{Kind: k, Message: msg}) }
 
 	if !d.CodeMatch {
-		if similarityValue(d.SimilarityScore) < d.Threshold {
+		if orZero(d.SimilarityScore) < d.Threshold {
 			// The message the check already reached, rather than a second
 			// wording maintained alongside it.
 			add(d.lowSimilarityKind(), d.Message)
@@ -207,9 +203,9 @@ type Result struct {
 func Reconcile(poa POAOrder, bc BCOrder, cfg Config) Result {
 	pairs := pairCandidates(poa, bc, cfg)
 
-	// Ambiguity resolution runs before the code bonus and before the margins:
-	// both the score the assignment sees and the verdict the checks reach
-	// depend on the final CodeMatch value.
+	// Ambiguity resolution runs before the code bonus: both the score the
+	// assignment sees and the verdict the checks reach depend on the final
+	// CodeMatch value.
 	resolveCodeAmbiguity(pairs)
 	// After resolveCodeAmbiguity, so the two withdrawal reasons compose rather
 	// than race: a pairing already withdrawn for matching several BC products
@@ -221,22 +217,7 @@ func Reconcile(poa POAOrder, bc BCOrder, cfg Config) Result {
 		}
 	}
 
-	// Provisional margins, against every alternative, because before the
-	// assignment none of them is spoken for. The sort below needs a verdict,
-	// and a verdict needs a margin.
-	fillMargins(pairs, func(int) bool { return true })
-
-	candidates := make([]ProductResult, len(pairs))
-	for i, p := range pairs {
-		candidates[i] = checkProduct(p, bc.Enrichment, cfg)
-	}
-	sortCandidates(candidates)
-
-	matched := assign(candidates, len(poa.Products), len(bc.Products), cfg)
-	links := make([]link, len(matched))
-	for i, m := range matched {
-		links[i] = link{poa: m.POAIndex, bc: m.BCIndex}
-	}
+	links := assign(pairs, len(poa.Products), len(bc.Products), cfg)
 	final := settle(pairs, links, poa, bc, cfg)
 
 	// The assignment could only express one line per product on each side.

@@ -135,7 +135,7 @@ func (c *BCClient) doRequest(ctx context.Context, method, pathAndQuery string, b
 	})
 
 	if err != nil {
-		return nil, 0, fmt.Errorf("acquirung BC token: %w", err)
+		return nil, 0, fmt.Errorf("acquiring BC token: %w", err)
 	}
 
 	var reader io.Reader
@@ -210,14 +210,44 @@ func (c *BCClient) GetPurchaseOrder(ctx context.Context, poNumber string) (*Purc
 	return &parsed.Value[0], nil
 }
 
-func (c *BCClient) GetitemRange(ctx context.Context, IT string) (*Item, error) {
-	if IT == "" {
-		return nil, errors.New("businesscentral: empty item number")
-	}
-	params := url.Values{}
-	params.Set("$filter", fmt.Sprintf("number eq '%s'", escapeODataString(IT)))
+// itemChunkSize caps how many item numbers go into one $filter, for the same
+// URL-length reason as caseysChunkSize.
+const itemChunkSize = 20
 
-	body, status, err := c.doRequest(ctx, http.MethodGet, "/items?"+params.Encode(), nil, nil)
+// GetItems looks up the item records for a set of item numbers, one request
+// per itemChunkSize numbers rather than one per number. The result is keyed
+// by upper-cased number; a number BC holds no item for is simply absent.
+//
+// A failing chunk does not stop the others: whatever arrived is returned
+// alongside the first error, so one bad request costs at most its own chunk.
+func (c *BCClient) GetItems(ctx context.Context, numbers []string) (map[string]Item, error) {
+	out := make(map[string]Item, len(numbers))
+	var firstErr error
+	for start := 0; start < len(numbers); start += itemChunkSize {
+		chunk := numbers[start:min(start+itemChunkSize, len(numbers))]
+		clauses := make([]string, len(chunk))
+		for i, n := range chunk {
+			clauses[i] = fmt.Sprintf("number eq '%s'", escapeODataString(n))
+		}
+		params := url.Values{}
+		params.Set("$filter", strings.Join(clauses, " or "))
+
+		items, err := c.getItemPage(ctx, "/items?"+params.Encode())
+		if err != nil {
+			if firstErr == nil {
+				firstErr = fmt.Errorf("fetching items %d-%d: %w", start, start+len(chunk), err)
+			}
+			continue
+		}
+		for _, item := range items {
+			out[strings.ToUpper(item.Number)] = item
+		}
+	}
+	return out, firstErr
+}
+
+func (c *BCClient) getItemPage(ctx context.Context, pathAndQuery string) ([]Item, error) {
+	body, status, err := c.doRequest(ctx, http.MethodGet, pathAndQuery, nil, nil)
 	if err != nil {
 		return nil, err
 	}
@@ -228,43 +258,58 @@ func (c *BCClient) GetitemRange(ctx context.Context, IT string) (*Item, error) {
 	if err := json.Unmarshal(body, &parsed); err != nil {
 		return nil, fmt.Errorf("parsing response: %w", err)
 	}
-	if len(parsed.Value) == 0 {
-		return nil, fmt.Errorf("item number %q not found", IT)
-	}
-	if len(parsed.Value) > 1 {
-		return nil, fmt.Errorf("item number %q matched %d records; expected exactly 1", IT, len(parsed.Value))
-	}
+	return parsed.Value, nil
+}
 
-	return &parsed.Value[0], nil
+// ItemNameLookup is what EnhancePurchaseOrderLines can say about itself, for
+// the run record.
+type ItemNameLookup struct {
+	Requested int   // distinct item numbers asked for
+	Returned  int   // how many of those BC returned a record for
+	Err       error // the first failure; nil when every request succeeded
 }
 
 // EnhancePurchaseOrderLines looks up the Item record behind each "Item" line
 // and copies its displayName/displayName2 onto the line, so downstream
 // description matching can prefer the item's own name over the PO line's
-// free-text Description. Lookups are cached per item number since multiple
-// lines on the same order commonly reference the same item. A line whose
-// item lookup fails is left as-is rather than failing the whole order — the
-// PO line's Description still stands in for it.
-func (c *BCClient) EnhancePurchaseOrderLines(ctx context.Context, lines []PurchaseOrderLine) []PurchaseOrderLine {
+// free-text Description.
+//
+// A line whose item could not be looked up keeps the PO line's own text
+// rather than failing the order. That changes what the comparison reads,
+// which is why the lookup reports how it went instead of swallowing errors:
+// it used to discard every failure, so a run that compared free text where it
+// normally compares item names looked exactly like one that did not.
+func (c *BCClient) EnhancePurchaseOrderLines(ctx context.Context, lines []PurchaseOrderLine) ([]PurchaseOrderLine, ItemNameLookup) {
 	out := make([]PurchaseOrderLine, len(lines))
 	copy(out, lines)
 
-	cache := make(map[string]*Item)
-	for i := range out {
-		if out[i].LineType != "Item" || out[i].LineObjectNumber == "" {
+	var numbers []string
+	seen := map[string]bool{}
+	for _, l := range out {
+		key := strings.ToUpper(l.LineObjectNumber)
+		if l.LineType != "Item" || key == "" || seen[key] {
 			continue
 		}
-		number := out[i].LineObjectNumber
-		item, looked := cache[number]
-		if !looked {
-			item, _ = c.GetitemRange(ctx, number)
-			cache[number] = item
+		seen[key] = true
+		numbers = append(numbers, l.LineObjectNumber)
+	}
+	lookup := ItemNameLookup{Requested: len(numbers)}
+	if len(numbers) == 0 {
+		return out, lookup
+	}
+
+	items, err := c.GetItems(ctx, numbers)
+	lookup.Returned, lookup.Err = len(items), err
+	for i := range out {
+		if out[i].LineType != "Item" {
+			continue
 		}
-		if item == nil {
+		item, ok := items[strings.ToUpper(out[i].LineObjectNumber)]
+		if !ok {
 			continue
 		}
 		out[i].DisplayName = item.DisplayName
 		out[i].DisplayName2 = item.DisplayName2
 	}
-	return out
+	return out, lookup
 }

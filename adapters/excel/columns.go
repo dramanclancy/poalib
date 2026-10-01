@@ -242,7 +242,7 @@ func matchColumns(cfg domain.Config) []column {
 			Meaning:  "The token in the supplier's text that looks like a product code, whether or not it matched anything.",
 			Source:   "The POA Description (compared) column.",
 			Calc:     fmt.Sprintf("The first word of %d or more characters that starts with a letter and contains a digit. Measurements are excluded because they lead with their number (150CM).", cfg.MinProductCodeLen),
-			Decision: "The lookup key a confirmed match would be recorded under, and what the missing-code message quotes.",
+			Decision: "What the missing-code message quotes. Where BC has no code on file, adding this value as the item's Vendor_Item_No lets future orders match exactly.",
 			Value:    func(m domain.ProductResult) any { return m.Description.POACode },
 		},
 		{

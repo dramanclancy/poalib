@@ -278,5 +278,14 @@ func Deref(p *float64) (float64, bool) {
 	return *p, true
 }
 
+// orZero reads an optional float as 0 when absent. Only for places where
+// absence and zero genuinely lead to the same answer — ranking similarities,
+// or a numeric sheet column that has to hold something. Anywhere a check
+// verdict depends on it, use Deref and handle the absence.
+func orZero(p *float64) float64 {
+	v, _ := Deref(p)
+	return v
+}
+
 // Ptr returns the address of v. Each call allocates, so results never alias.
 func Ptr[T any](v T) *T { return &v }

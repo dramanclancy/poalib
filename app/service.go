@@ -94,6 +94,9 @@ func (s *Service) reconcileOne(ctx context.Context, poaOrder domain.POAOrder, pa
 	rec.OrderNumberUsed = stats.OrderNumberUsed
 	rec.BCLinesFetched = stats.LinesFetched
 	rec.BCProductsBuilt = len(bcOrder.Products)
+	rec.ItemNamesRequested = stats.ItemNamesRequested
+	rec.ItemNamesReturned = stats.ItemNamesReturned
+	rec.ItemNamesError = stats.ItemNamesError
 	rec.EnrichmentState = string(bcOrder.Enrichment)
 	rec.EnrichmentAsked = stats.EnrichmentAsked
 	rec.ItemsRequested = stats.ItemsRequested

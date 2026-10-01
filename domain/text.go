@@ -1,8 +1,7 @@
 // Text handling: orientation classification and normalisation.
 //
-// Orientation (LHF/RHF) is resolved here and compared in checks.go.
-//
-// Orientation (LHF / RHF) is a *hard constraint*, not a fuzzy signal. It must
+// Orientation (LHF / RHF) is resolved here and compared in checks.go
+// (orientationCheck). It is a *hard constraint*, not a fuzzy signal. It must
 // never contribute to the similarity score used to pair a POA product with a
 // BC product — pairing on identity and validating on orientation are separate
 // jobs. Orientation is resolved independently on each side, compared after
@@ -135,7 +134,7 @@ func ResolveBC(itemDesc string, commentDescs []string) (Orientation, string) {
 
 // StripOrientation removes LHF/RHF tokens from a description.
 //
-// Orientation is verified on its own terms by Check(), so leaving the tokens
+// Orientation is verified on its own terms by orientationCheck, so leaving the tokens
 // in the text only adds noise to the similarity score: "RHF/LHF" will never
 // look like "RIGHT" to any string metric, whether or not the line is correct.
 func StripOrientation(s string) string {
@@ -155,9 +154,7 @@ var nonAlnum = regexp.MustCompile(`[^a-z0-9 ]+`)
 // whitespace, so the same text compares equal regardless of formatting.
 // Exported because an adapter merging BC text has to ask the same question
 // about duplicates that the comparison does.
-func Normalize(s string) string { return normalize(s) }
-
-func normalize(s string) string {
+func Normalize(s string) string {
 	s = strings.ReplaceAll(s, "Â", " ") // mojibake 'Â'
 	s = strings.ReplaceAll(s, " ", " ") // NBSP
 	s = strings.ToLower(s)

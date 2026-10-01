@@ -12,7 +12,7 @@ import (
 // extremes, which is all these tests need.
 func embed(s string) []float32 {
 	v := make([]float32, 64)
-	for _, tok := range strings.Fields(normalize(EmbeddingText(s))) {
+	for _, tok := range strings.Fields(Normalize(EmbeddingText(s))) {
 		h := fnv.New32a()
 		_, _ = h.Write([]byte(tok))
 		v[h.Sum32()%64]++

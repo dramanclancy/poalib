@@ -206,7 +206,7 @@ func findGroups(pairs []pairing, settled []ProductResult, poa POAOrder, bc BCOrd
 				continue
 			}
 			pair := at[[2]int{i, j}]
-			m := groupMember{groupLine: poaGroupLine(i, p), sim: similarityValue(pair.ev.Similarity)}
+			m := groupMember{groupLine: poaGroupLine(i, p), sim: orZero(pair.ev.Similarity)}
 			switch k, paired := poaPartner[i]; {
 			case paired && k == j:
 				required = len(cands)
@@ -257,7 +257,7 @@ func findGroups(pairs []pairing, settled []ProductResult, poa POAOrder, bc BCOrd
 				continue
 			}
 			pair := at[[2]int{i, j}]
-			m := groupMember{groupLine: bcGroupLine(j, b), sim: similarityValue(pair.ev.Similarity)}
+			m := groupMember{groupLine: bcGroupLine(j, b), sim: orZero(pair.ev.Similarity)}
 			switch k, paired := bcPartner[j]; {
 			case paired && k == i:
 				required = len(cands)
@@ -292,7 +292,7 @@ func findGroups(pairs []pairing, settled []ProductResult, poa POAOrder, bc BCOrd
 				if m == i || poaGrouped[m] || cleanPOA(m) {
 					continue
 				}
-				if similarityValue(at[[2]int{m, cands[n].index}].ev.Similarity) > cands[n].sim {
+				if orZero(at[[2]int{m, cands[n].index}].ev.Similarity) > cands[n].sim {
 					cands[n].closest = false
 					break
 				}
@@ -330,7 +330,7 @@ func rehomes(toAnchor, current pairing, cfg Config) bool {
 	case toAnchor.ev.CodeMatch:
 		return true
 	default:
-		return similarityValue(toAnchor.ev.Similarity)-similarityValue(current.ev.Similarity) >= cfg.MarginThreshold
+		return orZero(toAnchor.ev.Similarity)-orZero(current.ev.Similarity) >= cfg.MarginThreshold
 	}
 }
 
@@ -471,7 +471,7 @@ func groupEvidence(anchor groupLine, members []groupMember, cfg Config) (GroupEv
 // reads 2 would be a sentence nobody could check.
 func groupQuantityCheck(g LineGroup, poas []POAProduct, bcs []BCProduct) QuantityCheckResult {
 	r := QuantityCheckResult{Rule: g.Rule, PackRatio: 1}
-	r.CheckType = "quantity"
+	r.CheckType = CheckQuantity
 	r.Status = StatusMatch
 
 	poaQtys := make([]string, len(poas))
@@ -523,7 +523,7 @@ func groupPriceCheck(poas []POAProduct, bcs []BCProduct, cfg Config) PriceCheckR
 	}
 	diff := poaNet - bcNet
 	r := PriceCheckResult{POAPrice: poaNet, BCPrice: bcNet, Difference: diff, Tolerance: cfg.MoneyTolerance}
-	r.CheckType = "price"
+	r.CheckType = CheckPrice
 	lines := len(poas) + len(bcs) - 1
 	if math.Abs(diff) < cfg.MoneyTolerance {
 		r.Status = StatusMatch

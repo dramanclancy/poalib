@@ -42,7 +42,14 @@ type OrderStats struct {
 	// only when it differs from the one printed on the acknowledgement.
 	OrderNumberUsed string `json:"orderNumberUsed,omitempty"`
 
-	LinesFetched    int    `json:"linesFetched"`
+	LinesFetched int `json:"linesFetched"`
+
+	// Item names lead the description the comparison reads; a line whose
+	// name lookup failed is compared on the purchase order line's own text.
+	ItemNamesRequested int    `json:"itemNamesRequested"`
+	ItemNamesReturned  int    `json:"itemNamesReturned"`
+	ItemNamesError     string `json:"itemNamesError,omitempty"`
+
 	EnrichmentAsked bool   `json:"enrichmentAsked"`
 	ItemsRequested  int    `json:"itemsRequested"`
 	ItemsReturned   int    `json:"itemsReturned"`

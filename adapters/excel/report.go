@@ -208,6 +208,13 @@ func writeSummary(f *excelize.File, st styles, res domain.Result, run app.RunRec
 
 	put("BC lines fetched", run.BCLinesFetched, "Purchase order lines returned by Business Central, before grouping.")
 	put("BC products built", run.BCProductsBuilt, "Value-bearing lines, each with its comment lines attached.")
+	put("Item names requested", run.ItemNamesRequested, "Distinct item numbers whose display name was looked up. The item name leads the description that is compared.")
+	put("Item names returned", run.ItemNamesReturned, "Short of the number requested means some lines were compared on the purchase order line's own text instead.")
+	if run.ItemNamesError != "" {
+		errRow := row
+		put("Item name lookup error", run.ItemNamesError, "")
+		_ = f.SetCellStyle(sheetSummary, cell(2, errRow), cell(2, errRow), st.red)
+	}
 	put("POA lines extracted", run.POALinesExtracted, "")
 	put("Document pages merged", run.POAPagesMerged, "More than 1 means a multi-page acknowledgement was folded into one order.")
 
