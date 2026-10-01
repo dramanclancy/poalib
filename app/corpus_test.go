@@ -102,6 +102,60 @@ func TestCorpus_ThresholdSweep(t *testing.T) {
 	}
 }
 
+// TestCorpus_SplitAndAggregatedLines pins the intended outcome on the real
+// orders that exposed the one-to-one assumption — supplier and BC laying the
+// same goods out as different numbers of lines. TestCorpus only asserts that a
+// replay agrees with the stored expectation, and -update rewrites that; these
+// assertions are what stop a later regeneration quietly turning them back
+// into false negatives. Each case skips when its fixture is not on disk.
+func TestCorpus_SplitAndAggregatedLines(t *testing.T) {
+	cases := []struct {
+		pf           string
+		writeOK      bool
+		groups       int
+		unmatchedPOA int
+		why          string
+	}{
+		{"PF131114", true, 1, 0, "two wing-chair lines are BC's one line of 2"},
+		{"PF131048", false, 2, 5, "Eastbury and arm caps aggregate; '-' lines and free scatter packs stay unmatched"},
+		{"PF130794", true, 0, 0, "a Zip & Link mattress acknowledged as 2 parts at half BC's unit price"},
+		{"PF130999", true, 0, 0, "the same Zip & Link mattress on a later order"},
+		{"PF131012", false, 1, 0, "two divan halves are one base; descriptions too weak to approve"},
+		{"PF130543", false, 1, 0, "one acknowledged qty 2 is BC's same item on two lines"},
+		{"PF130884", false, 0, 1, "chaise + sofa unit, but the money differs: no structure is corroborated"},
+	}
+	for _, c := range cases {
+		t.Run(c.pf, func(t *testing.T) {
+			paths, _ := filepath.Glob(filepath.Join(corpusDir(), c.pf+"_*.json"))
+			if len(paths) == 0 {
+				t.Skipf("no fixture for %s", c.pf)
+			}
+			f, err := LoadFixture(paths[len(paths)-1])
+			if err != nil {
+				t.Fatal(err)
+			}
+			got := domain.Reconcile(f.POA, f.BC, f.Config)
+			groups := map[*domain.LineGroup]bool{}
+			for _, p := range got.Products {
+				if p.Group != nil {
+					groups[p.Group] = true
+				}
+			}
+			if got.WriteOK != c.writeOK || len(groups) != c.groups || len(got.UnmatchedPOA) != c.unmatchedPOA {
+				t.Errorf("%s: WriteOK %v, %d groups, %d unmatched POA lines; want %v, %d, %d",
+					c.why, got.WriteOK, len(groups), len(got.UnmatchedPOA), c.writeOK, c.groups, c.unmatchedPOA)
+			}
+		})
+	}
+}
+
+func groupLabel(g *domain.LineGroup) string {
+	if g == nil {
+		return ""
+	}
+	return g.String()
+}
+
 func loadCorpus(t *testing.T) []Fixture {
 	t.Helper()
 	dir := corpusDir()
@@ -143,6 +197,9 @@ func compareResults(want, got domain.Result) string {
 		if w.POAIndex != g.POAIndex || w.BC.LineID != g.BC.LineID {
 			return fmt.Sprintf("line %d paired POA %d with %s, want POA %d with %s",
 				i, g.POAIndex, g.BC.LineID, w.POAIndex, w.BC.LineID)
+		}
+		if a, b := groupLabel(w.Group), groupLabel(g.Group); a != b {
+			return fmt.Sprintf("line %d (POA %d) grouped as %q, want %q", i, w.POAIndex, b, a)
 		}
 		wc, gc := w.Checks(), g.Checks()
 		for j := range wc {

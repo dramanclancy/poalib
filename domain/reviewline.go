@@ -1,29 +1,25 @@
-// The review-queue view of a result: one flat row per flagged reason,
-// carrying everything a reviewer and the endpoint recording their verdict
-// need, with no reference back to the objects it came from.
+// The Review sheet's view of a result: one flat row per flagged pair,
+// carrying everything a person needs to act on it, with no reference back to
+// the objects it came from.
 //
-// The Excel Review sheet and the webhook are both this shape, so the two
-// surfaces stay a direct translation of each other.
+// These rows are a report and nothing more. They are not queued, posted or
+// stored anywhere, and no later reconciliation reads them: every run decides
+// from the two orders in front of it alone.
+
 package domain
 
-import (
-	"crypto/sha256"
-	"encoding/hex"
-	"fmt"
-)
-
-// ReviewLine is one flagged pair, flattened for the review queue.
+// ReviewLine is one flagged pair, flattened for the workbook's Review sheet.
 type ReviewLine struct {
 	POADescription string `json:"poaDescription"`
 	// BCDescription is the merged text the engine actually compared, never
 	// the raw purchase order line.
 	BCDescription string `json:"bcDescription"`
 	// Discrepancies is every reason this line needs a human, as separate
-	// typed entries, so a verdict applies to exactly one reason.
+	// typed entries, one Review sheet row each.
 	Discrepancies []Discrepancy `json:"discrepancies"`
 
 	// Identifiers — without these a row cannot be traced back to the line it
-	// came from, so feedback recorded against it is unattributable.
+	// came from.
 	PF            string `json:"pf"`
 	VendorNo      string `json:"vendorNo"`
 	VendorName    string `json:"vendorName"`
@@ -31,7 +27,10 @@ type ReviewLine struct {
 	BCItemNo      string `json:"bcItemNo"`
 	POALineIndex  int    `json:"poaLineIndex"`
 	EngineVersion string `json:"engineVersion"`
-	RowHash       string `json:"rowHash"`
+	// LineGroup describes the split or aggregated representation this pair
+	// belongs to, empty for an ordinary pair. A reviewer needs it to read the
+	// combined quantity and net figures on the row.
+	LineGroup string `json:"lineGroup,omitempty"`
 
 	// Carried for display only — never fold these back into identity scoring.
 	DescScore  float64 `json:"descScore"`
@@ -74,7 +73,7 @@ func (r Result) reviewLine(p ProductResult) ReviewLine {
 		BCItemNo:         p.BC.ItemNo,
 		POALineIndex:     p.POAIndex,
 		EngineVersion:    EngineVersion,
-		RowHash:          rowHash(r.POA.PF, p.BC.LineID, fmt.Sprint(p.POAIndex)),
+		LineGroup:        groupText(p.Group),
 		DescScore:        similarityValue(p.Description.SimilarityScore),
 		DescMargin:       optional(p.Description.Margin),
 		CodeMatchSource:  p.Description.CodeMatchSource,
@@ -88,7 +87,7 @@ func (r Result) reviewLine(p ProductResult) ReviewLine {
 	}
 }
 
-// optional flattens an absent number to 0 for a queue row, where a numeric
+// optional flattens an absent number to 0 for a sheet row, where a numeric
 // column has to hold something. The typed result keeps the nil.
 func optional(p *float64) float64 {
 	if p == nil {
@@ -97,11 +96,9 @@ func optional(p *float64) float64 {
 	return *p
 }
 
-// rowHash is a stable identifier for a review row, derived from the fields
-// that identify what it refers to. It lets a feedback endpoint detect a row
-// whose underlying line no longer exists (order re-run, line renumbered)
-// without depending on description text, which can legitimately change.
-func rowHash(parts ...string) string {
-	h := sha256.Sum256([]byte(fmt.Sprint(parts)))
-	return hex.EncodeToString(h[:])[:16]
+func groupText(g *LineGroup) string {
+	if g == nil {
+		return ""
+	}
+	return g.String()
 }

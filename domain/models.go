@@ -13,7 +13,30 @@
 //	BCOrder      one purchase order — order fields plus its BCProducts
 //
 // Each side is built independently and the two are then compared by
-// Reconcile, which is a pure function of (POAOrder, BCOrder, Config).
+// Reconcile, which is a pure function of (POAOrder, BCOrder, Config) and
+// returns a Result: one ProductResult per paired line, plus what could not be
+// paired, the order totals and the write gate.
+//
+// # How lines are matched
+//
+// Product identity and line layout are separate questions. Identity — which BC
+// product a supplier line is — is decided by description similarity, exact
+// supplier codes and quantity, and never by price. Layout — how many lines
+// each side spends on that product — is allowed to differ: a supplier may
+// print one line per chair where BC holds one line of 2, or a divan base as
+// its two halves. Reconcile first takes the best one-to-one assignment, then
+// repairs what that could not express with a LineGroup, whose quantity and
+// price are checked on the combined figures.
+//
+// # How results are verified
+//
+// Money, quantity, the POA's own arithmetic, seat count and handedness are
+// checked on each pair (or group) once it exists. Each check returns a
+// CheckStatus; only StatusMismatch blocks, and a check with nothing to compare
+// returns StatusUnknown and says why. Result.WriteOK is true only when every
+// acknowledged line was paired and every pair passed. Anything less is
+// flagged for a human in the report; no verdict a human gives is fed back into
+// a later reconciliation.
 package domain
 
 import "strings"

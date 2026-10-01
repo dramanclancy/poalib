@@ -1,5 +1,6 @@
 // Exact-code identity: the supplier printing a BC catalogue code verbatim,
 // and the three ways that can turn out to prove nothing.
+
 package domain
 
 import (

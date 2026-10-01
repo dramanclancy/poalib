@@ -7,6 +7,7 @@
 // BC product — pairing on identity and validating on orientation are separate
 // jobs. Orientation is resolved independently on each side, compared after
 // pairing, and gates the BC write.
+
 package domain
 
 import (

@@ -1,4 +1,5 @@
-// The reporting surface: a reconciliation as an xlsx workbook.
+// Package excel renders a reconciliation as an xlsx workbook: Summary,
+// Matches, Unmatched POA, Review, BC Lines and Definitions.
 //
 // Presentation only. Every verdict on every sheet is read off the check
 // results — nothing here re-compares anything, and no sheet shows a
@@ -176,7 +177,8 @@ func writeSummary(f *excelize.File, st styles, res domain.Result, run app.RunRec
 	put("Accepted without review", res.WriteOK,
 		"TRUE only when every acknowledged line was paired and every check passed. Unacknowledged BC lines and the order total are deliberately NOT part of this gate.")
 	_ = f.SetCellStyle(sheetSummary, cell(2, verdictRow), cell(2, verdictRow), map[bool]int{true: st.okBox, false: st.warnBox}[res.WriteOK])
-	put("Lines matched", run.LinesMatched, "Acknowledgement lines paired with a purchase order line.")
+	put("Lines matched", run.LinesMatched, "Pairs of an acknowledgement line with a purchase order line. A line in a split or aggregated group is counted once per line on the other side.")
+	put("Lines in split/aggregated groups", groupedRows(res), "Pairs where the supplier and the order lay one product out as different numbers of lines (see the Line Group column on Matches). Quantity and price are checked on each group's combined figures.")
 	put("Lines needing review", flagged, "Lines where at least one check failed. See the Review sheet.")
 	put("POA lines not matched", len(res.UnmatchedPOA), "Acknowledged lines with no counterpart on the order. Any of these blocks acceptance.")
 	put("BC lines not acknowledged", len(res.UnmatchedBC), "Order lines the supplier never mentioned. Reported, but does not block acceptance.")
@@ -317,8 +319,8 @@ func writeUnmatchedPOA(f *excelize.File, st styles, res domain.Result) {
 func writeReview(f *excelize.File, st styles, lines []domain.ReviewLine) error {
 	cols := []interface{}{
 		"PF", "VendorNo", "VendorName", "POADescription", "BCDescription",
-		"DiscrepancyType", "Discrepancy", "Learnability",
-		"BCLineID", "BCItemNo", "POALineIndex", "EngineVersion", "RowHash",
+		"DiscrepancyType", "Discrepancy",
+		"BCLineID", "BCItemNo", "POALineIndex", "LineGroup", "EngineVersion",
 		"DescScore", "DescMargin", "CodeDataState", "SeatDataState",
 	}
 	header(f, st, sheetReview, cols...)
@@ -336,16 +338,16 @@ func writeReview(f *excelize.File, st styles, lines []domain.ReviewLine) error {
 		for _, d := range reasons {
 			_ = f.SetSheetRow(sheetReview, fmt.Sprintf("A%d", row), &[]interface{}{
 				rl.PF, rl.VendorNo, rl.VendorName, rl.POADescription, rl.BCDescription,
-				string(d.Kind), d.Message, d.Kind.Learnability().String(),
-				rl.BCLineID, rl.BCItemNo, rl.POALineIndex, rl.EngineVersion, rl.RowHash,
+				string(d.Kind), d.Message,
+				rl.BCLineID, rl.BCItemNo, rl.POALineIndex, rl.LineGroup, rl.EngineVersion,
 				rl.DescScore, rl.DescMargin, rl.CodeDataState, rl.SeatDataState,
 			})
 			row++
 		}
 	}
 
-	// Registered as a real Excel Table: the Graph action that reads this sheet
-	// requires one.
+	// Registered as an Excel Table so a reader can sort and filter it by
+	// discrepancy type, supplier or line.
 	lastCol, _ := excelize.ColumnNumberToName(len(cols))
 	if err := f.AddTable(sheetReview, &excelize.Table{
 		Range: fmt.Sprintf("A1:%s%d", lastCol, row-1),
@@ -370,4 +372,15 @@ func writeBCLines(f *excelize.File, st styles, res domain.Result) {
 			b.Qty, b.UnitCost, b.Net,
 		})
 	}
+}
+
+// groupedRows counts the Matches rows that belong to a line group.
+func groupedRows(res domain.Result) int {
+	n := 0
+	for _, p := range res.Products {
+		if p.Group != nil {
+			n++
+		}
+	}
+	return n
 }

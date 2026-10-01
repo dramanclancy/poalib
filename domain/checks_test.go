@@ -299,6 +299,21 @@ func TestQuantityCheck_PackRatio(t *testing.T) {
 	}
 }
 
+// TestQuantityCheck_PartsPerUnit is the pack ratio the other way round: the
+// supplier counts the two mattresses of a Zip & Link, BC counts the one item.
+// PF130794 and PF130999 failed on quantity alone before this.
+func TestQuantityCheck_PartsPerUnit(t *testing.T) {
+	poa := POAProduct{Qty: 2, UnitPrice: 466}
+	bc := BCProduct{Qty: 1, UnitCost: 932}
+	if got := quantityCheck(poa, bc); got.Failed() || got.PartsPerUnit != 2 {
+		t.Errorf("2 parts at 466 vs 1 unit at 932: %q parts %d, want match at 2", got.Status, got.PartsPerUnit)
+	}
+	poa.UnitPrice = 932 // two whole units: the supplier is sending twice the goods
+	if got := quantityCheck(poa, bc); !got.Failed() {
+		t.Errorf("status = %q, want mismatch: a real quantity change must not pass as parts", got.Status)
+	}
+}
+
 func TestArithmeticCheck_AbsentTotalIsUnknownNotZero(t *testing.T) {
 	got := arithmeticCheck(POAProduct{Qty: 1, UnitPrice: 541}, cfg())
 	if got.Status != StatusUnknown || got.Failed() {

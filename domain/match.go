@@ -20,6 +20,7 @@
 //     genuinely differ ("HANSSON 2.5 STR END" vs "2.5 Seater End"), so any
 //     threshold high enough to reject wrong pairs also rejects right ones.
 //     Take the best assignment; use thresholds only to mark low confidence.
+
 package domain
 
 import (
@@ -138,32 +139,43 @@ func similarityValue(p *float64) float64 {
 // that never happened, which is what the 2026-09-04 batch showed on PF130365
 // as a negative margin.
 func fillMargins(all []pairing, available func(bcIndex int) bool) {
-	byPOA := map[int][]int{}
-	for i, p := range all {
-		byPOA[p.poaIndex] = append(byPOA[p.poaIndex], i)
+	for i := range all {
+		all[i].ev = marginEvidence(all, all[i], available)
 	}
-	for _, idxs := range byPOA {
-		for _, i := range idxs {
-			best, bestLabel, found := -1.0, "", false
-			for _, j := range idxs {
-				if all[j].bcIndex == all[i].bcIndex || !available(all[j].bcIndex) {
-					continue
-				}
-				found = true
-				if s := similarityValue(all[j].ev.Similarity); s > best {
-					best, bestLabel = s, all[j].bc.Label()
-				}
-			}
-			if !found {
-				all[i].ev.MarginNA = true
-				all[i].ev.Margin, all[i].ev.RunnerUp = 0, ""
-				continue
-			}
-			all[i].ev.MarginNA = false
-			all[i].ev.Margin = similarityValue(all[i].ev.Similarity) - best
-			all[i].ev.RunnerUp = bestLabel
+}
+
+// marginEvidence returns p's evidence with its margin recomputed against the
+// BC products available to p's POA line, other than p's own. Only the margin
+// fields change; similarity and code evidence are carried over as they are.
+func marginEvidence(all []pairing, p pairing, available func(bcIndex int) bool) MatchEvidence {
+	ev := p.ev
+	best, bestLabel, found := -1.0, "", false
+	for _, q := range all {
+		if q.poaIndex != p.poaIndex || q.bcIndex == p.bcIndex || !available(q.bcIndex) {
+			continue
+		}
+		found = true
+		if s := similarityValue(q.ev.Similarity); s > best {
+			best, bestLabel = s, q.bc.Label()
 		}
 	}
+	if !found {
+		ev.MarginNA, ev.Margin, ev.RunnerUp = true, 0, ""
+		return ev
+	}
+	ev.MarginNA = false
+	ev.Margin = similarityValue(ev.Similarity) - best
+	ev.RunnerUp = bestLabel
+	return ev
+}
+
+// pairIndex looks pairings up by (POA index, BC index).
+func pairIndex(all []pairing) map[[2]int]pairing {
+	at := make(map[[2]int]pairing, len(all))
+	for _, p := range all {
+		at[[2]int{p.poaIndex, p.bcIndex}] = p
+	}
+	return at
 }
 
 // ---------------------------------------------------------------------------
@@ -178,6 +190,11 @@ func fillMargins(all []pairing, available func(bcIndex int) bool) {
 // still gets its best one, flagged. Leaving it unmatched would report "the
 // supplier acknowledged a line we do not have" when what happened is "we could
 // not tell which of ours it is".
+//
+// One-to-one is an assumption about layout, not about goods: it holds only when
+// both sides spend the same number of lines on a product. findGroups, in
+// group.go, repairs what it gets wrong afterwards rather than complicating the
+// search here.
 func assign(candidates []ProductResult, nPOA, nBC int, cfg Config) []ProductResult {
 	if nPOA > cfg.ExhaustiveLimit || nBC > cfg.ExhaustiveLimit {
 		return greedyAssign(candidates)

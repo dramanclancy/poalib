@@ -61,9 +61,3 @@ type Embedder interface {
 	// is never ambiguous about which numbers produced its scores.
 	Describe() string
 }
-
-// ReviewSink receives the flagged rows. Optional: a nil sink means the queue
-// is not configured, which must never fail a reconciliation.
-type ReviewSink interface {
-	Publish(ctx context.Context, pf string, lines []domain.ReviewLine) error
-}

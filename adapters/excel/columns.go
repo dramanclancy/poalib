@@ -4,6 +4,7 @@
 // generated from these same specs — so a column can never exist without an
 // explanation, and an explanation can never describe a column that was
 // renamed or removed.
+
 package excel
 
 import (
@@ -46,7 +47,7 @@ func matchColumns(cfg domain.Config) []column {
 			Meaning:  "Position of this line in the supplier's acknowledgement, counting from 0.",
 			Source:   "The order the lines were extracted from the PDF.",
 			Calc:     "Assigned during extraction; stable for a given document.",
-			Decision: "Identifies the line for review feedback. It has no effect on matching.",
+			Decision: "Identifies the line when following up with the supplier. It has no effect on matching.",
 			Value:    func(m domain.ProductResult) any { return m.POAIndex },
 		},
 		{
@@ -109,7 +110,7 @@ func matchColumns(cfg domain.Config) []column {
 			Header:   "POA Net",
 			Meaning:  "What the line is worth according to the supplier, after discount.",
 			Source:   "POA Qty, POA Unit Price and whichever discount field is populated.",
-			Calc:     "Qty x Unit Price, minus the cash discount if there is one, otherwise less the discount percentage.",
+			Calc:     "Qty x Unit Price, minus the cash discount if there is one, otherwise less the discount percentage. On a row in a line group, the sum over every acknowledgement line in the group.",
 			Decision: "The figure the price check compares against BC Net.",
 			Value:    func(m domain.ProductResult) any { return m.Price.POAPrice },
 		},
@@ -119,7 +120,7 @@ func matchColumns(cfg domain.Config) []column {
 			Meaning:  "The Business Central item number this line was paired with.",
 			Source:   "The purchase order line (lineObjectNumber).",
 			Calc:     "Taken verbatim. Blank on account, G/L, fixed asset and resource lines.",
-			Decision: "Identifies the BC line for review feedback and for any later master-data fix.",
+			Decision: "Identifies the BC line for follow-up and for any master-data fix.",
 			Value:    func(m domain.ProductResult) any { return m.BC.ItemNo },
 		},
 		{
@@ -150,7 +151,7 @@ func matchColumns(cfg domain.Config) []column {
 			Header:   "BC Net",
 			Meaning:  "What the line is worth according to Business Central.",
 			Source:   "The purchase order line (netAmount).",
-			Calc:     "Taken verbatim — BC's own calculation, not recomputed here.",
+			Calc:     "Taken verbatim — BC's own calculation, not recomputed here. On a row in a line group, the sum over every order line in the group.",
 			Decision: "The figure the price check compares POA Net against.",
 			Value:    func(m domain.ProductResult) any { return m.Price.BCPrice },
 		},
@@ -159,8 +160,22 @@ func matchColumns(cfg domain.Config) []column {
 			Meaning:  "How much the supplier's figure differs from BC's, signed.",
 			Source:   "POA Net and BC Net.",
 			Calc:     "POA Net minus BC Net. Positive means the supplier is charging more than the order says.",
-			Decision: fmt.Sprintf("A difference of %.2f or more fails the price check and always needs a human — a price difference can never be approved into a rule.", cfg.MoneyTolerance),
+			Decision: fmt.Sprintf("A difference of %.2f or more fails the price check and always needs a human.", cfg.MoneyTolerance),
 			Value:    func(m domain.ProductResult) any { return m.Price.Difference },
+		},
+		{
+			Header:  "Line Group",
+			Meaning: "Set when the supplier and the order lay one product out as different numbers of lines: several acknowledgement lines for one order line (aggregate), or one acknowledgement line for several order lines (split).",
+			Source:  "The pairing, after the one-to-one assignment.",
+			Calc: "Names the lines on each side, the quantity rule and the evidence. \"sum\": the quantities on the many side add up to the single line's (1 + 1 chairs = 2). \"parts\": each line on the many side carries the single line's quantity and their unit prices add up to its unit price (two divan halves = one base). " +
+				"\"by identity\": every line passed the description check against the single line on its own. \"by money\": the descriptions were weaker, each line resembled the single line more than anything else still unpaired, and the combined money agreed.",
+			Decision: "On a grouped row, the quantity and price checks and the net columns describe the whole group; description, handedness, seats and arithmetic are still this row's own, and any of them failing still blocks acceptance. A group is never formed from a pair that already passed every check, and lines with no quantity never join one.",
+			Value: func(m domain.ProductResult) any {
+				if m.Group == nil {
+					return ""
+				}
+				return m.Group.String()
+			},
 		},
 
 		{
@@ -169,7 +184,7 @@ func matchColumns(cfg domain.Config) []column {
 			Source:  "Description similarity and quantity agreement only. Price and handedness are deliberately excluded.",
 			Calc: fmt.Sprintf("%.2f x description similarity, plus %.2f when the quantities agree, plus %.2f when a supplier code matched exactly.",
 				cfg.DescWeight, cfg.QtyBonus, cfg.CodeMatchBonus),
-			Decision: "The pairing chosen for the whole order is the combination of lines with the highest total score, each line used once. The score never refuses a pairing — it only ranks them.",
+			Decision: "The pairing chosen for the whole order is the combination of lines with the highest total score, each line used once; line groups are then formed only where that left something broken. The score never refuses a pairing — it only ranks them.",
 			Value:    func(m domain.ProductResult) any { return m.Score },
 		},
 		{
@@ -211,7 +226,7 @@ func matchColumns(cfg domain.Config) []column {
 			Meaning:  "Which BC field matched: Model_No, Vendor_Item_No, or both.",
 			Source:   "Item enrichment.",
 			Calc:     "Recorded when a code match is found. It stays filled in even if the match was later withdrawn as ambiguous, so the reason is auditable.",
-			Decision: "Audit only. Vendor_Item_No matches are the ones a feedback loop would eventually create more of.",
+			Decision: "Audit only. A Vendor_Item_No added to the BC item record is what turns a description-only match into a code match on future orders.",
 			Value:    func(m domain.ProductResult) any { return m.Description.CodeMatchSource },
 		},
 		{
@@ -234,8 +249,8 @@ func matchColumns(cfg domain.Config) []column {
 			Header:   "Pack Ratio",
 			Meaning:  "How many BC units the supplier counts as one.",
 			Source:   "POA Qty, BC Qty and both unit prices.",
-			Calc:     "1 when both sides count the same unit. Above 1 when BC's quantity is a whole multiple of the supplier's AND the unit prices confirm the same multiple. 0 when the quantities do not reconcile at all.",
-			Decision: "Lets a genuine packs-versus-singles difference pass the quantity check, while a real quantity change still fails it — the price has to agree with the count.",
+			Calc:     "1 when both sides count the same unit, and on every row of a line group. Above 1 when BC's quantity is a whole multiple of the supplier's AND the unit prices confirm the same multiple. 0 when the quantities do not reconcile — or when they reconcile the other way round, the supplier counting parts of BC's unit, which the Quantity Check message states.",
+			Decision: "Lets a genuine packs-versus-singles (or parts-versus-whole) difference pass the quantity check, while a real quantity change still fails it — the price has to agree with the count.",
 			Value:    func(m domain.ProductResult) any { return m.Quantity.PackRatio },
 		},
 
@@ -244,15 +259,15 @@ func matchColumns(cfg domain.Config) []column {
 			Meaning:  "Whether the money agrees.",
 			Source:   "POA Net against BC Net.",
 			Calc:     fmt.Sprintf("match when the difference is under %.2f, otherwise mismatch. There is no \"no data\" case — both sides always state a figure.", cfg.MoneyTolerance),
-			Decision: "A mismatch blocks automatic acceptance and can never be approved into a rule. Money is a control.",
+			Decision: "A mismatch blocks automatic acceptance. Money is a control.",
 			Value:    func(m domain.ProductResult) any { return status(m.Price.CheckResult) },
 		},
 		{
 			Header:   "Quantity Check",
 			Meaning:  "Whether the two sides mean the same amount of goods.",
 			Source:   "POA Qty, BC Qty, both unit prices.",
-			Calc:     "match when the quantities are equal, or when they differ by a pack ratio the unit prices confirm. Otherwise mismatch.",
-			Decision: "A mismatch blocks automatic acceptance and can never be approved into a rule. Quantity is a control.",
+			Calc:     "match when the quantities are equal, or when they differ by a pack or parts ratio the unit prices confirm. On a row in a line group, the group's combined quantities are compared under its rule. Otherwise mismatch.",
+			Decision: "A mismatch blocks automatic acceptance. Quantity is a control.",
 			Value:    func(m domain.ProductResult) any { return status(m.Quantity.CheckResult) },
 		},
 		{
@@ -268,7 +283,7 @@ func matchColumns(cfg domain.Config) []column {
 			Meaning:  "Whether handedness agrees — which way a corner unit or chaise faces.",
 			Source:   "Handedness words in the POA text, and in the BC line description and its comment lines.",
 			Calc:     "Each side is read independently. A BC line saying \"RHF/LHF\" is a heading offering both, not a specification, so the walk keeps looking and takes the definite reading from a comment line. match needs two definite, equal readings; unknown means neither side is handed (surcharges, carriage); anything else is a mismatch.",
-			Decision: "A mismatch blocks automatic acceptance. It is learnable only as a supplier-wide convention, never as an exemption for one line.",
+			Decision: "A mismatch blocks automatic acceptance. Handedness is a hard constraint; it never contributes to pairing.",
 			Value:    func(m domain.ProductResult) any { return status(m.Orientation.CheckResult) },
 		},
 		{
@@ -325,7 +340,7 @@ func matchColumns(cfg domain.Config) []column {
 			Source:  "DescScore, DescMargin and Code Match on this row.",
 			Calc: fmt.Sprintf("match when a code matched, or when DescScore is at least %.2f and DescMargin is at least %.2f. warning when identity holds but a code match was withdrawn as ambiguous. mismatch otherwise.",
 				cfg.DescThreshold, cfg.MarginThreshold),
-			Decision: "A mismatch blocks automatic acceptance. This is the check a reviewer's confirmation would eventually teach — unlike price and quantity, an identity judgement can become a rule.",
+			Decision: "A mismatch blocks automatic acceptance. When the cause is a missing code, the lasting fix is the Vendor_Item_No on the BC item record, not a decision about this order.",
 			Value:    func(m domain.ProductResult) any { return status(m.Description.CheckResult) },
 		},
 		{

@@ -15,9 +15,6 @@ type Service struct {
 	Scanner  DocScanner
 	Orders   OrderSource
 	Embedder Embedder
-	// Reviews is optional: a nil sink means the queue is not configured,
-	// which must never fail a reconciliation.
-	Reviews ReviewSink
 	// Fixtures is optional: nil means capture is disabled and nothing is
 	// written.
 	Fixtures *FixtureWriter
@@ -122,8 +119,7 @@ func (s *Service) reconcileOne(ctx context.Context, poaOrder domain.POAOrder, pa
 	}
 
 	// Capture after the comparison, so the fixture carries the result to
-	// replay against, and before the review queue, so a webhook failure never
-	// costs us the evidence.
+	// replay against.
 	if s.Fixtures.Enabled() {
 		path, err := s.Fixtures.Write(rec, poaOrder, bcOrder, result)
 		if err != nil {
@@ -133,14 +129,6 @@ func (s *Service) reconcileOne(ctx context.Context, poaOrder domain.POAOrder, pa
 			s.logf("capturing fixture for %s: %s", poaOrder.PF, err)
 		} else {
 			rec.FixturePath = path
-		}
-	}
-
-	if s.Reviews != nil {
-		if lines := result.ReviewLines(); len(lines) > 0 {
-			if err := s.Reviews.Publish(ctx, poaOrder.PF, lines); err != nil {
-				s.logf("publishing review lines for %s: %s", poaOrder.PF, err)
-			}
 		}
 	}
 

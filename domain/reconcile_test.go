@@ -85,7 +85,7 @@ func TestReconcile_PairsEveryLineAndGatesTheWrite(t *testing.T) {
 	if len(lines) != 1 {
 		t.Fatalf("ReviewLines() = %d, want 1", len(lines))
 	}
-	if lines[0].PF != "PF-GATE" || lines[0].BCItemNo != "IT2" || lines[0].RowHash == "" {
+	if lines[0].PF != "PF-GATE" || lines[0].BCItemNo != "IT2" || lines[0].BCLineID != "bc-2" {
 		t.Errorf("review row = %+v, want it traceable to PF-GATE / IT2", lines[0])
 	}
 	if lines[0].POANet != 200 || lines[0].BCNet != 220 {

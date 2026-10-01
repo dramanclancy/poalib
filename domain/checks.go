@@ -1,13 +1,14 @@
 // The comparison checks.
 //
 // Each takes one POAProduct and the BCProduct it was paired with, and returns
-// a struct — never a bare bool. The card, the report, the review queue and the
-// logs all read the same result, so none of them re-runs a comparison or needs
-// to understand how it was reached.
+// a struct — never a bare bool. The card, the report and the logs all read the
+// same result, so none of them re-runs a comparison or needs to understand how
+// it was reached.
 //
 // Every result embeds CheckResult: what was checked, how it came out, and what
 // to tell a human. The fields alongside are the values the check actually
 // compared, so a consumer can show its working.
+
 package domain
 
 import (
@@ -64,9 +65,8 @@ type PriceCheckResult struct {
 
 // priceCheck compares the net line value the supplier states against BC's.
 //
-// Money is a control: a reviewer may never teach the system that a price
-// difference is acceptable, so this check has no unknown — both sides always
-// state a figure.
+// Money is a control: a price difference always needs a human, so this check
+// has no unknown — both sides always state a figure.
 func priceCheck(poa POAProduct, bc BCProduct, cfg Config) PriceCheckResult {
 	diff := poa.Net() - bc.Net
 	r := PriceCheckResult{
@@ -95,15 +95,25 @@ type QuantityCheckResult struct {
 
 	POAQty float64 `json:"poaQty"`
 	BCQty  float64 `json:"bcQty"`
-	// PackRatio is 1 when both sides count the same unit, >1 when the
-	// supplier counts packs of that size, 0 when they do not reconcile.
+	// PackRatio is 1 when both sides count the same unit (and on every row of
+	// a LineGroup, whose Rule says how it reconciled), >1 when the supplier
+	// counts packs of that size, 0 when they do not reconcile as packs.
 	PackRatio int `json:"packRatio"`
+	// PartsPerUnit is >1 when the supplier counts parts of what BC holds as
+	// one unit — a Zip & Link mattress acknowledged as 2 mattresses — and 0
+	// otherwise. The mirror of PackRatio.
+	PartsPerUnit int `json:"partsPerUnit,omitempty"`
+	// Rule names how a quantity spread over several lines reconciled. Empty
+	// for an ordinary one-to-one pair; see LineGroup.
+	Rule QuantityRule `json:"rule,omitempty"`
 }
 
 // quantityCheck reports whether the two quantities describe the same physical
-// goods: equal, or BC = POA x r with the unit prices confirming the same ratio
-// (the supplier counts packs, BC counts singles). Both conditions must hold, so
-// a genuine quantity change can never slip through dressed as a pack size.
+// goods: equal, or one a whole multiple of the other with the unit prices
+// confirming the same ratio — BC = POA x r when the supplier counts packs and
+// BC singles, POA = BC x r when the supplier counts parts of what BC holds as
+// one unit. Both conditions must hold, so a genuine quantity change can never
+// slip through dressed as a pack size.
 //
 // Quantity is a control, like price — no unknown.
 func quantityCheck(poa POAProduct, bc BCProduct) QuantityCheckResult {
@@ -111,18 +121,42 @@ func quantityCheck(poa POAProduct, bc BCProduct) QuantityCheckResult {
 	r := QuantityCheckResult{POAQty: pq, BCQty: bq}
 	r.CheckType = "quantity"
 
-	switch ratio := packRatio(poa, bc); {
+	switch ratio, parts := packRatio(poa, bc), partsRatio(poa, bc); {
 	case ratio == 1:
 		r.PackRatio, r.Status = 1, StatusMatch
 		r.Message = fmt.Sprintf("quantity agrees (%g)", pq)
 	case ratio > 1:
 		r.PackRatio, r.Status = ratio, StatusMatch
 		r.Message = fmt.Sprintf("quantity agrees at %d per pack (POA %g packs, BC %g singles)", ratio, pq, bq)
+	case parts > 1:
+		r.PartsPerUnit, r.Status = parts, StatusMatch
+		r.Message = fmt.Sprintf("quantity agrees at %d parts per unit (POA %g parts, BC %g units)", parts, pq, bq)
 	default:
 		r.Status = StatusMismatch
 		r.Message = fmt.Sprintf("quantity differs (POA %g, BC %g)", pq, bq)
 	}
 	return r
+}
+
+// partsRatio is packRatio the other way round: the supplier counts r parts for
+// every unit BC orders, each priced at 1/r of BC's unit. CA24 acknowledges a
+// Zip & Link mattress as 2 x 466.00 where BC holds 1 x 932.00, which read as a
+// quantity mismatch on an order that agreed to the penny.
+//
+// The unit prices must confirm the ratio for the same reason as a pack's.
+func partsRatio(poa POAProduct, bc BCProduct) int {
+	pq, bq := float64(poa.Qty), bc.Qty
+	if pq <= bq || bq <= 0 {
+		return 0
+	}
+	r := math.Round(pq / bq)
+	if r < 2 || math.Abs(pq/bq-r) > 0.001 {
+		return 0
+	}
+	if math.Abs(poa.UnitNet()*r-bc.UnitNet()) > 0.01 {
+		return 0
+	}
+	return int(r)
 }
 
 func packRatio(poa POAProduct, bc BCProduct) int {
@@ -406,9 +440,9 @@ func bcSeatCount(bc BCProduct, cfg Config) (float64, bool) {
 
 // DescriptionCheckResult answers "are these two lines the same product?".
 //
-// Deliberately the richest result: a reviewer's verdict on one of these is
-// what a feedback loop would record as a Vendor_Item_No mapping, so everything
-// the verdict should be recorded against travels with it.
+// Deliberately the richest result: when identity fails, the fix is usually
+// master data (a Vendor_Item_No BC lacks), so everything a person needs to
+// make that fix travels with it.
 type DescriptionCheckResult struct {
 	CheckResult
 
@@ -558,9 +592,15 @@ type TotalsCheckResult struct {
 func totalsCheck(poa POAOrder, bc BCOrder, matched []ProductResult, unmatched []POAProduct, cfg Config) TotalsCheckResult {
 	total, source := poa.Total()
 
+	// Once per BC product: an aggregate group pairs several POA lines with the
+	// same one, and counting it per row would overstate what was matched.
 	var matchedTotal float64
+	counted := map[int]bool{}
 	for _, m := range matched {
-		matchedTotal += m.BC.Net
+		if !counted[m.BCIndex] {
+			counted[m.BCIndex] = true
+			matchedTotal += m.BC.Net
+		}
 	}
 
 	diff := total - bc.TotalExVAT

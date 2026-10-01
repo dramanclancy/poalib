@@ -5,6 +5,7 @@
 // performs no I/O. Both orders arrive fully built with their embeddings
 // attached, so the same inputs always produce the same result, and a captured
 // fixture replays offline with no credentials.
+
 package domain
 
 import (
@@ -15,8 +16,13 @@ import (
 // ProductResult is everything discovered about one matched pair: the two
 // products, and one result struct per check.
 //
-// This is what the report, the review queue and any card consume. None of them
-// decides anything the checks have not already decided.
+// When the pair is one line of a LineGroup — several lines on one side that
+// are together one line on the other — Group is set, and Quantity and Price
+// describe the whole group rather than this pair alone. Every other check is
+// still this pair's own.
+//
+// This is what the report and any card consume. None of them decides anything
+// the checks have not already decided.
 type ProductResult struct {
 	POA POAProduct `json:"poa"`
 	BC  BCProduct  `json:"bc"`
@@ -28,8 +34,12 @@ type ProductResult struct {
 	Description DescriptionCheckResult `json:"description"`
 	Seats       SeatsCheckResult       `json:"seats"`
 
+	// Group is the split or aggregated representation this pair belongs to,
+	// or nil for an ordinary one-to-one pair.
+	Group *LineGroup `json:"group,omitempty"`
+
 	// POAIndex/BCIndex are the positions of the two products in their orders.
-	// A review row records POAIndex so feedback can be traced back to the line.
+	// In a group, the anchor's index repeats across the group's rows.
 	POAIndex int `json:"poaLineIndex"`
 	BCIndex  int `json:"bcLineIndex"`
 
@@ -161,7 +171,9 @@ type Result struct {
 	POA POAOrder `json:"poa"`
 	BC  BCOrder  `json:"bc"`
 
-	// Products is one entry per matched pair, in POA line order.
+	// Products is one entry per matched pair, in POA then BC line order. A
+	// line in a LineGroup appears once per line on the other side of the
+	// group, so a POA or BC index can repeat.
 	Products []ProductResult `json:"products"`
 	// UnmatchedPOA is what the supplier acknowledged that could not be paired.
 	UnmatchedPOA []POAProduct `json:"unmatchedPOA"`
@@ -179,10 +191,23 @@ type Result struct {
 	Config Config `json:"config"`
 }
 
-// Reconcile compares one acknowledgement against one purchase order.
+// Reconcile compares one acknowledgement against one purchase order. It is a
+// pure function: the same orders and Config always produce the same Result.
 //
-// It coordinates; it does not compare. Pairing is match.go's, the verdicts are
-// checks.go's, and this decides only what runs in what order.
+// The steps, in order:
+//
+//  1. Score every POA line against every BC product on identity alone —
+//     description similarity, quantity agreement, exact codes (match.go).
+//  2. Choose the one-to-one assignment with the highest total score.
+//  3. Run every check on each chosen pair (checks.go).
+//  4. Where that left something broken, look for a product laid out as
+//     different lines on each side — split or aggregated — and replace the
+//     broken pairs with a LineGroup (group.go).
+//  5. Re-run the checks on the final pairs, with margins measured against
+//     what was really still available, and apply the write gate.
+//
+// It coordinates; it does not compare. Pairing is match.go's and group.go's,
+// the verdicts are checks.go's, and this decides only what runs in what order.
 func Reconcile(poa POAOrder, bc BCOrder, cfg Config) Result {
 	pairs := pairCandidates(poa, bc, cfg)
 
@@ -212,26 +237,18 @@ func Reconcile(poa POAOrder, bc BCOrder, cfg Config) Result {
 	sortCandidates(candidates)
 
 	matched := assign(candidates, len(poa.Products), len(bc.Products), cfg)
+	links := make([]link, len(matched))
+	for i, m := range matched {
+		links[i] = link{poa: m.POAIndex, bc: m.BCIndex}
+	}
+	final := settle(pairs, links, poa, bc, cfg)
 
-	// Now that the assignment is settled, recompute each margin against the BC
-	// products that were actually still available, and re-run the checks on
-	// the winners. Reporting a line as ambiguous against a product another POA
-	// line had already taken describes a contest that never happened.
-	takenBy := map[int]int{}
-	for _, m := range matched {
-		takenBy[m.BCIndex] = m.POAIndex
+	// The assignment could only express one line per product on each side.
+	// Groups are judged against its settled verdicts — a pair that passed
+	// every check is never broken up — and only then replace what they cover.
+	if groups := findGroups(pairs, final, poa, bc, cfg); len(groups) > 0 {
+		final = settle(pairs, regroup(links, groups), poa, bc, cfg)
 	}
-	final := make([]ProductResult, 0, len(matched))
-	for _, m := range matched {
-		fillMarginsFor(pairs, m.POAIndex, m.BCIndex, takenBy)
-		for i := range pairs {
-			if pairs[i].poaIndex == m.POAIndex && pairs[i].bcIndex == m.BCIndex {
-				final = append(final, checkProduct(pairs[i], bc.Enrichment, cfg))
-				break
-			}
-		}
-	}
-	sort.Slice(final, func(i, j int) bool { return final[i].POAIndex < final[j].POAIndex })
 
 	usedPOA, usedBC := map[int]bool{}, map[int]bool{}
 	for _, m := range final {
@@ -262,38 +279,67 @@ func Reconcile(poa POAOrder, bc BCOrder, cfg Config) Result {
 	}
 }
 
-// fillMarginsFor recomputes one chosen pairing's margin against the BC
-// products still available to its POA line: unassigned ones, plus its own.
-func fillMarginsFor(pairs []pairing, poaIndex, bcIndex int, takenBy map[int]int) {
-	best, bestLabel, found := -1.0, "", false
-	self := -1
-	for i := range pairs {
-		if pairs[i].poaIndex != poaIndex {
-			continue
+// link is one row of the result being built: a POA line, a BC product, and
+// the group the pair belongs to, if any.
+type link struct {
+	poa, bc int
+	group   *LineGroup
+}
+
+// regroup replaces every link that touches a grouped line with the group's
+// own links. A line pulled into a group leaves its old partner unmatched.
+func regroup(links []link, groups []LineGroup) []link {
+	inGroup := map[[2]int]bool{} // {side, index}: 0 = POA, 1 = BC
+	var out []link
+	for n := range groups {
+		g := &groups[n]
+		for _, i := range g.POAIndexes {
+			inGroup[[2]int{0, i}] = true
+			for _, j := range g.BCIndexes {
+				out = append(out, link{poa: i, bc: j, group: g})
+			}
 		}
-		if pairs[i].bcIndex == bcIndex {
-			self = i
-			continue
-		}
-		if owner, taken := takenBy[pairs[i].bcIndex]; taken && owner != poaIndex {
-			continue // spoken for by another POA line; never a real alternative
-		}
-		found = true
-		if s := similarityValue(pairs[i].ev.Similarity); s > best {
-			best, bestLabel = s, pairs[i].bc.Label()
+		for _, j := range g.BCIndexes {
+			inGroup[[2]int{1, j}] = true
 		}
 	}
-	if self < 0 {
-		return
+	for _, l := range links {
+		if !inGroup[[2]int{0, l.poa}] && !inGroup[[2]int{1, l.bc}] {
+			out = append(out, l)
+		}
 	}
-	if !found {
-		pairs[self].ev.MarginNA = true
-		pairs[self].ev.Margin, pairs[self].ev.RunnerUp = 0, ""
-		return
+	return out
+}
+
+// settle runs every check on the chosen links, in POA then BC line order.
+//
+// Each margin is recomputed against the BC products nobody holds. Reporting a
+// line as ambiguous against a product another POA line had already taken
+// describes a contest that never happened — and in a split group, the other
+// BC lines of the same group are the same product, not rivals to it.
+func settle(pairs []pairing, links []link, poa POAOrder, bc BCOrder, cfg Config) []ProductResult {
+	held := map[int]bool{}
+	for _, l := range links {
+		held[l.bc] = true
 	}
-	pairs[self].ev.MarginNA = false
-	pairs[self].ev.Margin = similarityValue(pairs[self].ev.Similarity) - best
-	pairs[self].ev.RunnerUp = bestLabel
+	at := pairIndex(pairs)
+	out := make([]ProductResult, 0, len(links))
+	for _, l := range links {
+		p := at[[2]int{l.poa, l.bc}]
+		p.ev = marginEvidence(pairs, p, func(k int) bool { return !held[k] })
+		r := checkProduct(p, bc.Enrichment, cfg)
+		if l.group != nil {
+			r.applyGroup(l.group, poa, bc, cfg)
+		}
+		out = append(out, r)
+	}
+	sort.Slice(out, func(i, j int) bool {
+		if out[i].POAIndex != out[j].POAIndex {
+			return out[i].POAIndex < out[j].POAIndex
+		}
+		return out[i].BCIndex < out[j].BCIndex
+	})
+	return out
 }
 
 // writeOK is the gate: every acknowledged line paired, and every pair clean.
