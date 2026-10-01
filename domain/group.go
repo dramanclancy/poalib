@@ -181,142 +181,278 @@ type groupMember struct {
 // the whole order, not a different layout of one product, and guessing at it
 // would cost more trust than it gains.
 func findGroups(pairs []pairing, settled []ProductResult, poa POAOrder, bc BCOrder, cfg Config) []LineGroup {
-	at := pairIndex(pairs)
-	poaPartner, bcPartner := map[int]int{}, map[int]int{}
-	clean := map[[2]int]bool{}
-	for _, r := range settled {
-		poaPartner[r.POAIndex], bcPartner[r.BCIndex] = r.BCIndex, r.POAIndex
-		clean[[2]int{r.POAIndex, r.BCIndex}] = r.OK()
-	}
-	poaGrouped, bcGrouped := map[int]bool{}, map[int]bool{}
-	cleanPOA := func(i int) bool { j, ok := poaPartner[i]; return ok && clean[[2]int{i, j}] }
-	cleanBC := func(j int) bool { i, ok := bcPartner[j]; return ok && clean[[2]int{i, j}] }
-
+	s := newGroupSearch(pairs, settled, poa, bc, cfg)
 	var groups []LineGroup
 
 	// Several acknowledgement lines, one BC product.
-	for j, anchorBC := range bc.Products {
-		if bcGrouped[j] || anchorBC.Qty <= 0 || cleanBC(j) {
-			continue
+	for j := range bc.Products {
+		if g, ok := s.aggregateAt(j); ok {
+			groups = append(groups, g)
 		}
-		var cands []groupMember
-		required := -1
-		for i, p := range poa.Products {
-			if poaGrouped[i] || p.Qty <= 0 {
-				continue
-			}
-			pair := at[[2]int{i, j}]
-			m := groupMember{groupLine: poaGroupLine(i, p), sim: orZero(pair.ev.Similarity)}
-			switch k, paired := poaPartner[i]; {
-			case paired && k == j:
-				required = len(cands)
-			case !paired:
-			case !clean[[2]int{i, k}] && rehomes(pair, at[[2]int{i, k}], cfg):
-				m.rehomed = true
-			default:
-				continue
-			}
-			// Margin from the member's own side: the BC products it could
-			// still have been, other than this anchor.
-			inPlay := func(k int) bool { return k != j && !bcGrouped[k] && !cleanBC(k) }
-			ev := marginEvidence(pairs, pair, inPlay)
-			m.identified = !descriptionCheck(pair.poa, pair.bc, ev, bc.Enrichment, cfg).Failed()
-			m.closest = ev.MarginNA || ev.Margin >= 0
-			cands = append(cands, m)
-		}
-		if _, partnered := bcPartner[j]; partnered && required < 0 {
-			continue // the anchor's partner cannot join, so no group can replace the pair
-		}
-		members, rule, evidence, ok := chooseGroup(bcGroupLine(j, anchorBC), cands, required, cfg)
-		if !ok {
-			continue
-		}
-		g := LineGroup{Kind: GroupAggregate, Rule: rule, Evidence: evidence, BCIndexes: []int{j}}
-		for _, m := range members {
-			g.POAIndexes = append(g.POAIndexes, m.index)
-			poaGrouped[m.index] = true
-			if m.rehomed {
-				delete(bcPartner, poaPartner[m.index])
-			}
-			delete(poaPartner, m.index)
-		}
-		bcGrouped[j] = true
-		delete(bcPartner, j)
-		groups = append(groups, g)
 	}
-
 	// One acknowledgement line, several BC products.
-	for i, anchorPOA := range poa.Products {
-		if poaGrouped[i] || anchorPOA.Qty <= 0 || cleanPOA(i) {
-			continue
+	for i := range poa.Products {
+		if g, ok := s.splitAt(i); ok {
+			groups = append(groups, g)
 		}
-		var cands []groupMember
-		required := -1
-		for j, b := range bc.Products {
-			if bcGrouped[j] || b.Qty <= 0 {
-				continue
-			}
-			pair := at[[2]int{i, j}]
-			m := groupMember{groupLine: bcGroupLine(j, b), sim: orZero(pair.ev.Similarity)}
-			switch k, paired := bcPartner[j]; {
-			case paired && k == i:
-				required = len(cands)
-			case !paired:
-			case !clean[[2]int{k, j}] && rehomes(pair, at[[2]int{k, j}], cfg):
-				m.rehomed = true
-			default:
-				continue
-			}
-			cands = append(cands, m)
-		}
-		if _, partnered := poaPartner[i]; partnered && required < 0 {
-			continue
-		}
-		isCand := map[int]bool{}
-		for _, m := range cands {
-			isCand[m.index] = true
-		}
-		for n := range cands {
-			pair := at[[2]int{i, cands[n].index}]
-			// The description check reads margin from the POA line's side,
-			// and the anchor's own alternatives are the BC products outside
-			// the candidate set — the others are the same product, not
-			// rivals to it.
-			inPlay := func(k int) bool { return !isCand[k] && !bcGrouped[k] && !cleanBC(k) }
-			ev := marginEvidence(pairs, pair, inPlay)
-			cands[n].identified = !descriptionCheck(pair.poa, pair.bc, ev, bc.Enrichment, cfg).Failed()
-			// "Closest" from the BC product's side: no other acknowledgement
-			// line still in play resembles it more.
-			cands[n].closest = true
-			for m := range poa.Products {
-				if m == i || poaGrouped[m] || cleanPOA(m) {
-					continue
-				}
-				if orZero(at[[2]int{m, cands[n].index}].ev.Similarity) > cands[n].sim {
-					cands[n].closest = false
-					break
-				}
-			}
-		}
-		members, rule, evidence, ok := chooseGroup(poaGroupLine(i, anchorPOA), cands, required, cfg)
-		if !ok {
-			continue
-		}
-		g := LineGroup{Kind: GroupSplit, Rule: rule, Evidence: evidence, POAIndexes: []int{i}}
-		for _, m := range members {
-			g.BCIndexes = append(g.BCIndexes, m.index)
-			bcGrouped[m.index] = true
-			if m.rehomed {
-				delete(poaPartner, bcPartner[m.index])
-			}
-			delete(bcPartner, m.index)
-		}
-		poaGrouped[i] = true
-		delete(poaPartner, i)
-		groups = append(groups, g)
 	}
 	return groups
 }
+
+// groupSearch is findGroups' bookkeeping: who each line is paired with after
+// the one-to-one assignment, which of those pairs passed every check, and
+// which lines a group has already claimed. Groups are found one anchor at a
+// time and each claim updates this state, so the order anchors are visited in
+// decides which later groups are still possible.
+type groupSearch struct {
+	pairs []pairing
+	at    map[[2]int]pairing
+	poa   POAOrder
+	bc    BCOrder
+	cfg   Config
+
+	poaPartner map[int]int     // POA line -> the BC product it is paired with
+	bcPartner  map[int]int     // BC product -> the POA line it is paired with
+	clean      map[[2]int]bool // {POA, BC} pair -> passed every check
+	poaGrouped map[int]bool    // POA lines already in a group
+	bcGrouped  map[int]bool    // BC products already in a group
+}
+
+func newGroupSearch(pairs []pairing, settled []ProductResult, poa POAOrder, bc BCOrder, cfg Config) *groupSearch {
+	s := &groupSearch{
+		pairs: pairs, at: pairIndex(pairs), poa: poa, bc: bc, cfg: cfg,
+		poaPartner: map[int]int{}, bcPartner: map[int]int{}, clean: map[[2]int]bool{},
+		poaGrouped: map[int]bool{}, bcGrouped: map[int]bool{},
+	}
+	for _, r := range settled {
+		s.poaPartner[r.POAIndex], s.bcPartner[r.BCIndex] = r.BCIndex, r.POAIndex
+		s.clean[[2]int{r.POAIndex, r.BCIndex}] = r.OK()
+	}
+	return s
+}
+
+// cleanPOA and cleanBC report whether a line sits in a pair that passed every
+// check. Such a pair is never broken up.
+func (s *groupSearch) cleanPOA(i int) bool {
+	j, ok := s.poaPartner[i]
+	return ok && s.clean[[2]int{i, j}]
+}
+
+func (s *groupSearch) cleanBC(j int) bool {
+	i, ok := s.bcPartner[j]
+	return ok && s.clean[[2]int{i, j}]
+}
+
+// standing is where a line on the many side stands relative to a group being
+// formed around an anchor, judged by the pair it sits in now.
+type standing int
+
+const (
+	excluded       standing = iota // sits in a pair that should stand; cannot join
+	unpaired                       // in no pair; free to join
+	anchorsPartner                 // already paired with the anchor; every group must include it
+	rehomed                        // leaves a failing pair it fits worse than the anchor
+)
+
+// standing classifies a candidate line. toAnchor is its pairing with the
+// anchor; current is its pairing with its present partner, meaningful only
+// when paired; partnerIsAnchor says whether that partner is the anchor itself.
+func (s *groupSearch) standing(toAnchor, current pairing, paired, partnerIsAnchor bool) standing {
+	switch {
+	case paired && partnerIsAnchor:
+		return anchorsPartner
+	case !paired:
+		return unpaired
+	case !s.clean[[2]int{current.poaIndex, current.bcIndex}] && rehomes(toAnchor, current, s.cfg):
+		return rehomed
+	default:
+		return excluded
+	}
+}
+
+// identifies reports whether a pairing passes the description check with the
+// given margin evidence.
+func (s *groupSearch) identifies(p pairing, ev MatchEvidence) bool {
+	return !descriptionCheck(p.poa, p.bc, ev, s.bc.Enrichment, s.cfg).Failed()
+}
+
+// ---------------------------------------------------------------------------
+// Several acknowledgement lines, one BC product (aggregate)
+// ---------------------------------------------------------------------------
+
+// aggregateAt tries to form a group of POA lines around BC product j.
+func (s *groupSearch) aggregateAt(j int) (LineGroup, bool) {
+	anchor := s.bc.Products[j]
+	if s.bcGrouped[j] || anchor.Qty <= 0 || s.cleanBC(j) {
+		return LineGroup{}, false
+	}
+	cands, required := s.aggregateCandidates(j)
+	if _, partnered := s.bcPartner[j]; partnered && required < 0 {
+		return LineGroup{}, false // the anchor's partner cannot join, so no group can replace the pair
+	}
+	members, rule, evidence, ok := chooseGroup(bcGroupLine(j, anchor), cands, required, s.cfg)
+	if !ok {
+		return LineGroup{}, false
+	}
+	g := LineGroup{Kind: GroupAggregate, Rule: rule, Evidence: evidence, BCIndexes: []int{j}}
+	for _, m := range members {
+		g.POAIndexes = append(g.POAIndexes, m.index)
+	}
+	s.claimAggregate(j, members)
+	return g, true
+}
+
+// aggregateCandidates lists the POA lines that could join a group around BC
+// product j, and the position of j's current partner among them (-1 if none).
+//
+// Evidence is judged from each member's own side, because each is a separate
+// acknowledgement line: its margin is measured against the BC products it
+// could still have been other than the anchor, and it is "closest" when none
+// of those resembles it more than the anchor does.
+func (s *groupSearch) aggregateCandidates(j int) ([]groupMember, int) {
+	var cands []groupMember
+	required := -1
+	inPlay := func(k int) bool { return k != j && !s.bcGrouped[k] && !s.cleanBC(k) }
+	for i, p := range s.poa.Products {
+		if s.poaGrouped[i] || p.Qty <= 0 {
+			continue
+		}
+		toAnchor := s.at[[2]int{i, j}]
+		k, paired := s.poaPartner[i]
+		m := groupMember{groupLine: poaGroupLine(i, p), sim: orZero(toAnchor.ev.Similarity)}
+		switch s.standing(toAnchor, s.at[[2]int{i, k}], paired, k == j) {
+		case anchorsPartner:
+			required = len(cands)
+		case rehomed:
+			m.rehomed = true
+		case excluded:
+			continue
+		}
+		ev := marginEvidence(s.pairs, toAnchor, inPlay)
+		m.identified = s.identifies(toAnchor, ev)
+		m.closest = ev.MarginNA || ev.Margin >= 0
+		cands = append(cands, m)
+	}
+	return cands, required
+}
+
+// claimAggregate marks the anchor and its members as grouped. A member pulled
+// out of another pair leaves that pair's BC product unpartnered, free for a
+// later group.
+func (s *groupSearch) claimAggregate(j int, members []groupMember) {
+	for _, m := range members {
+		s.poaGrouped[m.index] = true
+		if m.rehomed {
+			delete(s.bcPartner, s.poaPartner[m.index])
+		}
+		delete(s.poaPartner, m.index)
+	}
+	s.bcGrouped[j] = true
+	delete(s.bcPartner, j)
+}
+
+// ---------------------------------------------------------------------------
+// One acknowledgement line, several BC products (split)
+// ---------------------------------------------------------------------------
+
+// splitAt tries to form a group of BC products around POA line i.
+func (s *groupSearch) splitAt(i int) (LineGroup, bool) {
+	anchor := s.poa.Products[i]
+	if s.poaGrouped[i] || anchor.Qty <= 0 || s.cleanPOA(i) {
+		return LineGroup{}, false
+	}
+	cands, required := s.splitCandidates(i)
+	if _, partnered := s.poaPartner[i]; partnered && required < 0 {
+		return LineGroup{}, false
+	}
+	members, rule, evidence, ok := chooseGroup(poaGroupLine(i, anchor), cands, required, s.cfg)
+	if !ok {
+		return LineGroup{}, false
+	}
+	g := LineGroup{Kind: GroupSplit, Rule: rule, Evidence: evidence, POAIndexes: []int{i}}
+	for _, m := range members {
+		g.BCIndexes = append(g.BCIndexes, m.index)
+	}
+	s.claimSplit(i, members)
+	return g, true
+}
+
+// splitCandidates lists the BC products that could join a group around POA
+// line i, and the position of i's current partner among them (-1 if none).
+//
+// Evidence works differently from an aggregate, and on purpose. Every member
+// is paired with the same POA line, so the description check's margin is
+// read from that line's side, and its rivals are the BC products OUTSIDE the
+// candidate set — the other candidates are parts of the same product, not
+// alternatives to it. That needs the whole candidate set, so evidence is
+// judged after it is collected. "Closest" is read from each BC product's
+// side: no other acknowledgement line still in play resembles it more.
+func (s *groupSearch) splitCandidates(i int) ([]groupMember, int) {
+	var cands []groupMember
+	required := -1
+	for j, b := range s.bc.Products {
+		if s.bcGrouped[j] || b.Qty <= 0 {
+			continue
+		}
+		toAnchor := s.at[[2]int{i, j}]
+		k, paired := s.bcPartner[j]
+		m := groupMember{groupLine: bcGroupLine(j, b), sim: orZero(toAnchor.ev.Similarity)}
+		switch s.standing(toAnchor, s.at[[2]int{k, j}], paired, k == i) {
+		case anchorsPartner:
+			required = len(cands)
+		case rehomed:
+			m.rehomed = true
+		case excluded:
+			continue
+		}
+		cands = append(cands, m)
+	}
+
+	isCand := map[int]bool{}
+	for _, m := range cands {
+		isCand[m.index] = true
+	}
+	inPlay := func(k int) bool { return !isCand[k] && !s.bcGrouped[k] && !s.cleanBC(k) }
+	for n := range cands {
+		toAnchor := s.at[[2]int{i, cands[n].index}]
+		cands[n].identified = s.identifies(toAnchor, marginEvidence(s.pairs, toAnchor, inPlay))
+		cands[n].closest = s.noOtherPOALineCloser(i, cands[n])
+	}
+	return cands, required
+}
+
+// noOtherPOALineCloser reports whether no acknowledgement line still in play,
+// other than the anchor, resembles BC product m more than the anchor does.
+func (s *groupSearch) noOtherPOALineCloser(anchor int, m groupMember) bool {
+	for i := range s.poa.Products {
+		if i == anchor || s.poaGrouped[i] || s.cleanPOA(i) {
+			continue
+		}
+		if orZero(s.at[[2]int{i, m.index}].ev.Similarity) > m.sim {
+			return false
+		}
+	}
+	return true
+}
+
+// claimSplit marks the anchor and its members as grouped. A member pulled out
+// of another pair leaves that pair's POA line unpartnered, free for a later
+// group.
+func (s *groupSearch) claimSplit(i int, members []groupMember) {
+	for _, m := range members {
+		s.bcGrouped[m.index] = true
+		if m.rehomed {
+			delete(s.poaPartner, s.bcPartner[m.index])
+		}
+		delete(s.bcPartner, m.index)
+	}
+	s.poaGrouped[i] = true
+	delete(s.poaPartner, i)
+}
+
+// ---------------------------------------------------------------------------
+// Rules shared by both directions
+// ---------------------------------------------------------------------------
 
 // rehomes reports whether a line already paired elsewhere may leave that pair
 // to join a group: it must resemble the anchor clearly more — by at least the
