@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log"
+	"strings"
 	"time"
 
 	"github.com/dramanclancy/poalib/domain"
@@ -70,6 +71,20 @@ func (s *Service) Reconcile(ctx context.Context, scans []domain.POAOrder) []Outc
 		out = append(out, s.reconcileOne(ctx, orders[pf], pages[pf]))
 	}
 	return out
+}
+
+// normalisePF gives a printed order number the form BC files it under:
+// trimmed, upper case, and prefixed "PF" unless it already carries PF or SF.
+//
+// It runs before scans are grouped. Run after, "131425" and "PF131425" from
+// the same file were two groups that both became PF131425, and each half of
+// the acknowledgement was reconciled against the whole order.
+func normalisePF(pf string) string {
+	pf = strings.ToUpper(strings.TrimSpace(pf))
+	if strings.HasPrefix(pf, "PF") || strings.HasPrefix(pf, "SF") {
+		return pf
+	}
+	return "PF" + pf
 }
 
 func (s *Service) reconcileOne(ctx context.Context, poaOrder domain.POAOrder, pages int) Outcome {
@@ -188,6 +203,7 @@ func groupScansByPF(scans []domain.POAOrder) (map[string]domain.POAOrder, map[st
 	order := make([]string, 0, len(scans))
 
 	for _, scan := range scans {
+		scan.PF = normalisePF(scan.PF)
 		pages[scan.PF]++
 		existing, ok := byPF[scan.PF]
 		if !ok {

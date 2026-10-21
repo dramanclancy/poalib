@@ -39,7 +39,10 @@
 // a later reconciliation.
 package domain
 
-import "strings"
+import (
+	"math"
+	"strings"
+)
 
 // ---------------------------------------------------------------------------
 // POA side
@@ -57,6 +60,12 @@ type POAProduct struct {
 	UnitPrice       float64 `json:"unitPrice"`
 	DiscountPercent float64 `json:"discountPercent"`
 	DiscountAmount  float64 `json:"discountAmount"`
+	// FurtherDiscountPercent and FurtherDiscountAmount are a second discount
+	// that compounds on the first: it applies to the line after the first
+	// discount, never to the gross. Like the first pair, they are two
+	// representations of one discount, not two discounts.
+	FurtherDiscountPercent float64 `json:"furtherDiscountPercent,omitempty"`
+	FurtherDiscountAmount  float64 `json:"furtherDiscountAmount,omitempty"`
 
 	// LineTotal is the total the supplier printed for the line, or nil when
 	// the supplier prints no such column at all (Ashwood). Absent is not
@@ -83,39 +92,65 @@ func (p POAProduct) Text() string {
 // mirroring BC's Line Discount % / Line Discount Amount pair — they are never
 // additive. The cash figure wins: it is what posts, and it survives rounding
 // that a recomputed percentage would not.
+//
+// A further discount then compounds on what the first left: 10% then a
+// further 5% is 0.90 × 0.95 of the gross, not 0.85.
 func (p POAProduct) Net() float64 {
 	gross := float64(p.Qty) * p.UnitPrice
+	var net float64
 	switch {
 	case p.DiscountAmount != 0:
-		return gross - p.DiscountAmount
+		net = gross - p.DiscountAmount
 	case p.DiscountPercent != 0:
-		return gross * (1 - p.DiscountPercent/100)
+		net = gross * (1 - p.DiscountPercent/100)
 	default:
-		return gross
+		net = gross
+	}
+	switch {
+	case p.FurtherDiscountAmount != 0:
+		return net - p.FurtherDiscountAmount
+	case p.FurtherDiscountPercent != 0:
+		return net * (1 - p.FurtherDiscountPercent/100)
+	default:
+		return net
 	}
 }
 
 // UnitNet is the per-unit equivalent of Net, applying the same discount rules
 // so the two cannot disagree about what a discount is.
 func (p POAProduct) UnitNet() float64 {
+	var unit float64
 	switch {
 	case p.DiscountAmount != 0 && p.Qty > 0:
-		return p.UnitPrice - p.DiscountAmount/float64(p.Qty)
+		unit = p.UnitPrice - p.DiscountAmount/float64(p.Qty)
 	case p.DiscountPercent != 0:
-		return p.UnitPrice * (1 - p.DiscountPercent/100)
+		unit = p.UnitPrice * (1 - p.DiscountPercent/100)
 	default:
-		return p.UnitPrice
+		unit = p.UnitPrice
+	}
+	switch {
+	case p.FurtherDiscountAmount != 0 && p.Qty > 0:
+		return unit - p.FurtherDiscountAmount/float64(p.Qty)
+	case p.FurtherDiscountPercent != 0:
+		return unit * (1 - p.FurtherDiscountPercent/100)
+	default:
+		return unit
 	}
 }
 
 // POAOrder is one extracted acknowledgement: one PF worth of lines.
 type POAOrder struct {
 	// PF is the purchase order number the acknowledgement answers.
-	PF                   string       `json:"pf"`
-	TotalExVAT           *float64     `json:"totalExVAT"`
-	ProposedDeliveryDate string       `json:"proposedDeliveryDate"`
-	ReferenceNumber      string       `json:"referenceNumber"`
-	Products             []POAProduct `json:"products"`
+	PF                   string   `json:"pf"`
+	TotalExVAT           *float64 `json:"totalExVAT"`
+	ProposedDeliveryDate string   `json:"proposedDeliveryDate"`
+	ReferenceNumber      string   `json:"referenceNumber"`
+	// OrderDiscount is a discount the supplier takes off the order's ex-VAT
+	// total rather than off any line: an amount, or a percentage when
+	// OrderDiscountIsPercent. nil means none was printed.
+	OrderDiscount          *float64     `json:"orderDiscount,omitempty"`
+	OrderDiscountIsPercent bool         `json:"orderDiscountIsPercent,omitempty"`
+	Products               []POAProduct `json:"products"`
 }
 
 // NetFromLines sums the net of every extracted line — the correct order total
@@ -128,12 +163,58 @@ func (o POAOrder) NetFromLines() float64 {
 	return t
 }
 
-// Total is the order's ex-VAT total and where the figure came from.
+// Total is the order's ex-VAT total and where the figure came from, after any
+// order discount.
+//
+// The discount comes off the ex-VAT total. Whether the printed total already
+// has it taken off varies by layout, so the document decides: when the lines
+// less the discount equal the printed total, the printed figure is already
+// net of it and stands; otherwise the discount comes off the printed total.
+// Taking it off twice would turn a clean order into a dispute.
 func (o POAOrder) Total() (float64, string) {
-	if o.TotalExVAT != nil {
-		return *o.TotalExVAT, "stated on document"
+	lines := o.NetFromLines()
+	if o.OrderDiscount == nil || *o.OrderDiscount == 0 {
+		if o.TotalExVAT != nil {
+			return *o.TotalExVAT, "stated on document"
+		}
+		return lines, "derived from lines"
 	}
-	return o.NetFromLines(), "derived from lines"
+	if o.TotalExVAT == nil {
+		return lines - o.orderDiscountOn(lines), "derived from lines, less order discount"
+	}
+	stated := *o.TotalExVAT
+	if o.discountAlreadyDeducted(lines, stated) {
+		return stated, "stated on document, order discount already deducted"
+	}
+	return stated - o.orderDiscountOn(stated), "stated on document, less order discount"
+}
+
+// OrderDiscountValue is the order discount in money, on the total Total
+// applies it to. Zero when none was printed.
+func (o POAOrder) OrderDiscountValue() float64 {
+	if o.OrderDiscount == nil {
+		return 0
+	}
+	lines := o.NetFromLines()
+	if o.TotalExVAT == nil || o.discountAlreadyDeducted(lines, *o.TotalExVAT) {
+		return o.orderDiscountOn(lines)
+	}
+	return o.orderDiscountOn(*o.TotalExVAT)
+}
+
+// discountAlreadyDeducted reports whether the printed total is the lines less
+// the order discount.
+func (o POAOrder) discountAlreadyDeducted(lines, stated float64) bool {
+	return math.Abs(lines-o.orderDiscountOn(lines)-stated) < 0.01
+}
+
+// orderDiscountOn is the order discount in money against a given base.
+func (o POAOrder) orderDiscountOn(base float64) float64 {
+	d, _ := Deref(o.OrderDiscount)
+	if o.OrderDiscountIsPercent {
+		return base * d / 100
+	}
+	return d
 }
 
 // ---------------------------------------------------------------------------

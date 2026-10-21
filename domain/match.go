@@ -56,14 +56,21 @@ type pairing struct {
 	bc       BCProduct
 	ev       MatchEvidence
 	score    float64
+
+	// ruledOut marks a pair that cannot be the same line whatever it scores:
+	// see chargeMismatch. Reconcile drops it after assignment and findGroups
+	// never forms a group through it. It stays in the candidate set so
+	// margins and lookups by index still see every pair.
+	ruledOut bool
 }
 
 // pairCandidates scores every POA product against every BC product.
 func pairCandidates(poa POAOrder, bc BCOrder, cfg Config) []pairing {
 	all := make([]pairing, 0, len(poa.Products)*len(bc.Products))
+	listed := trustsVendorItemNo(bc.VendorNo, bc.VendorName)
 	for i, p := range poa.Products {
 		for j, b := range bc.Products {
-			all = append(all, scorePairing(i, p, j, b, bc.VendorNo, cfg))
+			all = append(all, scorePairing(i, p, j, b, bc.VendorNo, listed, cfg))
 		}
 	}
 	return all
@@ -72,9 +79,16 @@ func pairCandidates(poa POAOrder, bc BCOrder, cfg Config) []pairing {
 // scorePairing scores one pair on identity alone: how alike the descriptions
 // are, and whether the quantities describe the same goods. Money and handedness
 // are deliberately absent.
-func scorePairing(poaIndex int, poa POAProduct, bcIndex int, bc BCProduct, vendorNo string, cfg Config) pairing {
+//
+// listed says the order's vendor is on VendorItemNoVendors (vendors.go): its
+// Product column matching Vendor_Item_No exactly is a code match even below
+// MinCodeLen.
+func scorePairing(poaIndex int, poa POAProduct, bcIndex int, bc BCProduct, vendorNo string, listed bool, cfg Config) pairing {
 	sim := similarityOf(poa.Embedding, bc.Embedding)
 	codeMatched, codeSource := codeMatch(squash(poa.Text()), bc, vendorNo, cfg)
+	if !codeMatched && listed && listedVendorItemNoMatch(poa, bc, vendorNo, cfg) {
+		codeMatched, codeSource = true, "Vendor_Item_No (listed vendor)"
+	}
 
 	var score float64
 	if sim != nil {
@@ -86,8 +100,36 @@ func scorePairing(poaIndex int, poa POAProduct, bcIndex int, bc BCProduct, vendo
 
 	return pairing{
 		poaIndex: poaIndex, bcIndex: bcIndex, poa: poa, bc: bc, score: score,
-		ev: MatchEvidence{Similarity: sim, CodeMatch: codeMatched, CodeMatchSource: codeSource},
+		ev:       MatchEvidence{Similarity: sim, CodeMatch: codeMatched, CodeMatchSource: codeSource},
+		ruledOut: chargeMismatch(poa, bc),
 	}
+}
+
+// chargeMismatch reports whether bc is a charge line — an Account, G/L or
+// other non-item line, which is nothing but a sum of money — and poa carries
+// no money at all, so cannot be acknowledging it.
+//
+// This reads money, but it does not let price decide identity: it decides
+// what KIND of line each side is. A charge has no product description to
+// compare, so once assign has placed the real products, a free-text line left
+// over pairs with the surcharge by elimination. PF130268's "Customer Note **
+// QUICKSHIP ORDER" at 0.00 was paired with BC's Vendor Surcharges 14.92 and
+// reported as a price difference, when what happened was that the supplier
+// did not acknowledge the surcharge. Left apart, the note is an unmatched
+// acknowledgement line and the surcharge an unacknowledged BC line, which is
+// the true account of the order.
+func chargeMismatch(poa POAProduct, bc BCProduct) bool {
+	if !isChargeLine(bc) {
+		return false
+	}
+	printed, _ := Deref(poa.LineTotal)
+	return poa.Net() == 0 && printed == 0
+}
+
+// isChargeLine reports whether bc is an Account, G/L or other non-item line:
+// a sum of money with no product behind it.
+func isChargeLine(bc BCProduct) bool {
+	return bc.LineType != "" && bc.LineType != "Item"
 }
 
 // similarityOf is the description-identity signal, or nil when either side has

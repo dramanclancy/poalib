@@ -84,7 +84,7 @@ func TestReconcile_AggregateSum(t *testing.T) {
 	if r.Products[2].Group != nil {
 		t.Errorf("the sofa is an ordinary pair and must not be grouped")
 	}
-	if r.Totals.MatchedTotal != bc.TotalExVAT+1155+1512.23 {
+	if r.Totals.MatchedTotal != 1155+1512.23 {
 		t.Errorf("matched total = %.2f, want each BC product counted once (2667.23)", r.Totals.MatchedTotal)
 	}
 }
@@ -208,6 +208,90 @@ func TestReconcile_PartsWithWeakDescriptionsAreFlaggedNotApproved(t *testing.T) 
 	}
 }
 
+// TestReconcile_DutyFoldedIntoProductPriceIsNotReviewed is PF131672: the
+// supplier itemises duty that BC carries inside the rug's price. The rug is
+// identified and the money agrees, so the duty line has nothing left to
+// review.
+func TestReconcile_DutyFoldedIntoProductPriceIsNotReviewed(t *testing.T) {
+	poa, bc := order(
+		POAOrder{PF: "PF-DUTY", Products: []POAProduct{
+			line("Coast Rug Charcoal 160x230cm Katherine Carnaby", 1, 226.32),
+			{Code: "DUTY", Description: "Duty", Qty: 1, UnitPrice: 18.11},
+		}},
+		BCOrder{VendorNo: "VX1", Enrichment: EnrichmentApplied, Products: []BCProduct{
+			bcProduct("bc-1", "IT1", "Coast Rug Charcoal 160x230cm KATHERINE CARNABY", 1, 244.43, 244.43),
+		}},
+	)
+
+	r := Reconcile(poa, bc, cfg())
+
+	if !r.WriteOK || len(r.ReviewLines()) != 0 {
+		t.Fatalf("WriteOK=%v review rows %d, want the duty folded into the rug:%s",
+			r.WriteOK, len(r.ReviewLines()), describeRows(r))
+	}
+	groupOf(t, r, 0, 1)
+	d := r.Products[1].Description
+	if !d.FoldedCharge || d.Status != StatusWarning {
+		t.Errorf("duty row: folded=%v status=%q, want a folded charge reported as a warning", d.FoldedCharge, d.Status)
+	}
+	if r.Products[0].Description.FoldedCharge {
+		t.Errorf("the rug is the product, not a charge")
+	}
+}
+
+// TestReconcile_BCChargeFoldedIntoAcknowledgedPrice is the mirror: the
+// supplier's price includes the duty, and BC carries it on a G/L line.
+func TestReconcile_BCChargeFoldedIntoAcknowledgedPrice(t *testing.T) {
+	duty := bcProduct("bc-2", "", "Import Duty", 1, 18.11, 18.11)
+	duty.LineType = "G/L Account"
+	poa, bc := order(
+		POAOrder{PF: "PF-BCDUTY", Products: []POAProduct{
+			line("Coast Rug Charcoal 160x230cm Katherine Carnaby", 1, 244.43),
+		}},
+		BCOrder{VendorNo: "VX1", Enrichment: EnrichmentApplied, Products: []BCProduct{
+			bcProduct("bc-1", "IT1", "Coast Rug Charcoal 160x230cm KATHERINE CARNABY", 1, 226.32, 226.32),
+			duty,
+		}},
+	)
+
+	r := Reconcile(poa, bc, cfg())
+
+	if !r.WriteOK || len(r.UnmatchedBC) != 0 {
+		t.Fatalf("WriteOK=%v unmatched BC %d, want BC's duty line folded into the rug:%s",
+			r.WriteOK, len(r.UnmatchedBC), describeRows(r))
+	}
+	if g := groupOf(t, r, 0, 1); g.Kind != GroupSplit {
+		t.Errorf("group = %s, want split", g)
+	}
+	if !r.Products[1].Description.FoldedCharge {
+		t.Errorf("BC's G/L duty line should be reported as a folded charge")
+	}
+}
+
+// TestReconcile_CodedLineIsNeverTreatedAsACharge: a line printing a product
+// code is a product, however little its words resemble BC's, so a weak
+// description beside an identified line still blocks.
+func TestReconcile_CodedLineIsNeverTreatedAsACharge(t *testing.T) {
+	poa, bc := order(
+		POAOrder{PF: "PF-CODED", Products: []POAProduct{
+			line("Coast Rug Charcoal 160x230cm Katherine Carnaby", 1, 226.32),
+			{Code: "UL160", Description: "Underlay", Qty: 1, UnitPrice: 18.11},
+		}},
+		BCOrder{VendorNo: "VX1", Enrichment: EnrichmentApplied, Products: []BCProduct{
+			bcProduct("bc-1", "IT1", "Coast Rug Charcoal 160x230cm KATHERINE CARNABY", 1, 244.43, 244.43),
+		}},
+	)
+
+	r := Reconcile(poa, bc, cfg())
+
+	if r.WriteOK {
+		t.Fatalf("WriteOK=true: a coded line with an unidentified description must still be reviewed:%s", describeRows(r))
+	}
+	if d := r.Products[1].Description; d.FoldedCharge || !d.Failed() {
+		t.Errorf("underlay row: folded=%v status=%q, want the weak description still flagged", d.FoldedCharge, d.Status)
+	}
+}
+
 // TestReconcile_DuplicateAcknowledgementStaysUnmatched: qty 1 printed twice
 // against BC's qty 1 is a duplicate, not a split — neither the quantities nor
 // the unit prices add up — and the pair that agrees is never broken up to
@@ -324,7 +408,8 @@ func TestReconcile_GroupPriceDifferenceIsReported(t *testing.T) {
 // a POA line unmatched while a BC product is free, so the second chair is
 // forced onto the surcharge line. It resembles the chair line clearly more,
 // so it moves into the chair's group and the surcharge is reported as not
-// acknowledged — which is what happened.
+// acknowledged — which is what happened. The order still goes to a person:
+// the unacknowledged surcharge leaves the total short.
 func TestReconcile_GroupReclaimsLineFromAForcedPair(t *testing.T) {
 	poa, bc := order(
 		POAOrder{PF: "PF-REHOME", Products: []POAProduct{
@@ -339,8 +424,14 @@ func TestReconcile_GroupReclaimsLineFromAForcedPair(t *testing.T) {
 
 	r := Reconcile(poa, bc, cfg())
 
-	if !r.WriteOK {
-		t.Fatalf("WriteOK=false, want both chairs grouped onto bc-1:%s", describeRows(r))
+	if len(r.Products) != 2 || r.Products[0].Group == nil || r.Products[0].BC.LineID != "bc-1" || r.Products[1].BC.LineID != "bc-1" {
+		t.Fatalf("want both chairs grouped onto bc-1:%s", describeRows(r))
+	}
+	if len(r.Flagged()) != 0 {
+		t.Errorf("want the grouped chairs to pass every check:%s", describeRows(r))
+	}
+	if r.WriteOK {
+		t.Errorf("WriteOK=true, want the unacknowledged surcharge to block through the total")
 	}
 	if len(r.UnmatchedBC) != 1 || r.UnmatchedBC[0].LineID != "bc-2" {
 		t.Errorf("want the surcharge reported as not acknowledged")

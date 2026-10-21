@@ -16,6 +16,7 @@ import (
 	"math"
 	"regexp"
 	"strconv"
+	"strings"
 )
 
 // CheckStatus is the fixed vocabulary every check answers in.
@@ -490,6 +491,16 @@ type DescriptionCheckResult struct {
 	// it matched — what the missing-code message quotes, and the value to add
 	// as the BC item's Vendor_Item_No.
 	POACode string `json:"poaCode"`
+	// VendorItemNoMatch says whether the code the supplier printed in its
+	// Product column is BC's Vendor_Item_No: "exact", "prefix" (the supplier
+	// adds a suffix, C260-P against C260), or "" for no. Reported only; it
+	// does not decide identity — see vendorItemNoMatch.
+	VendorItemNoMatch string `json:"vendorItemNoMatch,omitempty"`
+	// FoldedCharge marks a duty, surcharge or similar charge that one side
+	// itemises and the other carries inside a product's price. There is no
+	// product to identify, so the row warns rather than blocks — see
+	// foldCharges for the conditions.
+	FoldedCharge bool `json:"foldedCharge,omitempty"`
 	// CodeDataState records what is actually known about BC's codes, so a
 	// message never blames master data for a lookup that never ran.
 	CodeDataState CodeDataState `json:"codeDataState"`
@@ -544,6 +555,7 @@ func descriptionCheck(poa POAProduct, bc BCProduct, ev MatchEvidence, state Enri
 		CodeAmbiguousWith: ev.CodeAmbiguousWith,
 		VariantAmbiguity:  ev.VariantAmbiguity,
 		POACode:           productCodeIn(poa.Text(), cfg),
+		VendorItemNoMatch: vendorItemNoMatch(poa.Code, bc, cfg),
 		Threshold:         cfg.DescThreshold,
 		MarginThreshold:   cfg.MarginThreshold,
 	}
@@ -633,7 +645,7 @@ type TotalsCheckResult struct {
 // totalsCheck compares the supplier's order total against BC's, catching what
 // per-line checks cannot: drift that survived them, VAT included where it
 // should not be, or a misread of the total field.
-func totalsCheck(poa POAOrder, bc BCOrder, matched []ProductResult, unmatched []POAProduct, cfg Config) TotalsCheckResult {
+func totalsCheck(poa POAOrder, bc BCOrder, matched []ProductResult, unmatched []POAProduct, unacknowledged []BCProduct, cfg Config) TotalsCheckResult {
 	total, source := poa.Total()
 
 	// Once per BC product: an aggregate group pairs several POA lines with the
@@ -661,5 +673,44 @@ func totalsCheck(poa POAOrder, bc BCOrder, matched []ProductResult, unmatched []
 	}
 	r.Status = StatusMismatch
 	r.Message = fmt.Sprintf("order total differs from BC by %+.2f (POA %.2f %s, BC %.2f)", diff, total, source, bc.TotalExVAT)
+	r.Message += unacknowledgedShare(diff, unacknowledged, cfg)
 	return r
+}
+
+// unacknowledgedShare splits a total difference into the part that is BC lines
+// the acknowledgement never lists and the part on the lines it does, naming
+// the missing lines.
+//
+// Without it, a supplier that leaves off BC's Vendor Surcharges line and a
+// second acknowledgement covering 1 of 14 lines (PF131425: "differs by
+// -54154.60") read the same as a price dispute. The status is unchanged —
+// the order really does not total what BC holds — but the message now says
+// whether to look for a missing document or at the money.
+func unacknowledgedShare(diff float64, unacknowledged []BCProduct, cfg Config) string {
+	if len(unacknowledged) == 0 {
+		return ""
+	}
+	var missing float64
+	labels := make([]string, 0, 3)
+	for _, b := range unacknowledged {
+		missing += b.Net
+		if len(labels) < 3 {
+			// A charge line's "item number" is its G/L account (718000);
+			// its description (Vendor Surcharges) is what a reader recognises.
+			name := b.Label()
+			if b.LineType != "Item" && strings.TrimSpace(b.Description) != "" {
+				name = strings.TrimSpace(b.Description)
+			}
+			labels = append(labels, fmt.Sprintf("%s %.2f", name, b.Net))
+		}
+	}
+	if more := len(unacknowledged) - len(labels); more > 0 {
+		labels = append(labels, fmt.Sprintf("and %d more", more))
+	}
+	s := fmt.Sprintf(": %+.2f is %d BC line(s) this acknowledgement does not list (%s)",
+		-missing, len(unacknowledged), strings.Join(labels, ", "))
+	if rest := diff + missing; math.Abs(rest) >= cfg.OrderTolerance {
+		return s + fmt.Sprintf(", and %+.2f is on the lines it does list", rest)
+	}
+	return s + "; the lines it does list agree"
 }

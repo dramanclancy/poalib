@@ -63,6 +63,67 @@ func TestExtractOrders_SeveralPurchaseOrdersInOneFile(t *testing.T) {
 	}
 }
 
+// TestExtractOrders_OrderDiscount: the order-level discount is read as an
+// amount, or as a rate when it prints "%", and is absent when blank.
+func TestExtractOrders_OrderDiscount(t *testing.T) {
+	cases := []struct {
+		content string
+		want    *float64
+		percent bool
+	}{
+		{"12.90", domain.Ptr(12.90), false},
+		{"5%", domain.Ptr(5.0), true},
+		{"", nil, false},
+	}
+	for _, tc := range cases {
+		doc := Document{Fields: map[string]Field{
+			"Purchase Order No.": {Content: "PF080317"},
+			"Order Discount":     {Content: tc.content},
+			"Order Details": {ValueArray: []Field{{ValueObject: map[string]Field{
+				"Product": {Content: "LAW45"}, "Qty": {Content: "1.00"}, "Unit Product Price": {Content: "199.0000"},
+			}}}},
+		}}
+		got := (&Scanner{Log: func(string, ...any) {}}).extractOrders([]Document{doc})
+		if len(got) != 1 {
+			t.Fatalf("%q: extracted %d orders", tc.content, len(got))
+		}
+		o := got[0]
+		gv, gok := domain.Deref(o.OrderDiscount)
+		wv, wok := domain.Deref(tc.want)
+		if gok != wok || gv != wv || o.OrderDiscountIsPercent != tc.percent {
+			t.Errorf("%q: discount %v (set %v) percent %v, want %v (set %v) percent %v",
+				tc.content, gv, gok, o.OrderDiscountIsPercent, wv, wok, tc.percent)
+		}
+	}
+}
+
+// TestExtractOrders_FurtherDiscount: the model's further-discount columns
+// reach the line, and the line's net compounds them on the first discount.
+func TestExtractOrders_FurtherDiscount(t *testing.T) {
+	doc := Document{Fields: map[string]Field{
+		"Purchase Order No.": {Content: "PF080317"},
+		"Order Details": {ValueArray: []Field{{ValueObject: map[string]Field{
+			"Product":                 {Content: "LAW45"},
+			"Qty":                     {Content: "1.00"},
+			"Unit Product Price":      {Content: "200.0000"},
+			"Discount%":               {Content: "10%"},
+			"Further Discount %":      {Content: "5%"},
+			"Further Discount Amount": {Content: ""},
+		}}}},
+	}}
+	got := (&Scanner{Log: func(string, ...any) {}}).extractOrders([]Document{doc})
+	if len(got) != 1 || len(got[0].Products) != 1 {
+		t.Fatalf("extracted %+v", got)
+	}
+	p := got[0].Products[0]
+	if p.FurtherDiscountPercent != 5 || p.FurtherDiscountAmount != 0 {
+		t.Errorf("further discount = %v%% / %v, want 5%% / 0", p.FurtherDiscountPercent, p.FurtherDiscountAmount)
+	}
+	if net := p.Net(); net < 170.99 || net > 171.01 {
+		t.Errorf("net = %.2f, want 171.00 (200 × 0.90 × 0.95)", net)
+	}
+}
+
 func TestParseMoney(t *testing.T) {
 	cases := []struct {
 		in     string
@@ -99,6 +160,48 @@ func TestParseMoney(t *testing.T) {
 		got, ok := parseMoney(c.in)
 		if ok != c.wantOK || got != c.want {
 			t.Errorf("parseMoney(%q) = %v, %v; want %v, %v", c.in, got, ok, c.want, c.wantOK)
+		}
+	}
+}
+
+// TestExtractOrders_DropsBlankRowsAndSplitsSpilledCodes: Kaymed and Harrison
+// Spinks layouts return "-" rows between real lines, and put a whole line's
+// text in the Product column with Description empty.
+func TestExtractOrders_DropsBlankRowsAndSplitsSpilledCodes(t *testing.T) {
+	row := func(product, desc, qty, unit string) Field {
+		return Field{ValueObject: map[string]Field{
+			"Product":            {Content: product},
+			"Description":        {Content: desc},
+			"Qty":                {Content: qty},
+			"Unit Product Price": {Content: unit},
+		}}
+	}
+	doc := Document{Fields: map[string]Field{
+		"Purchase Order No.": {Content: "PF130001"},
+		"Order Details": {ValueArray: []Field{
+			row("CA24 Natural Indulge", "", "1", "748.00"),
+			row("-", "", "", ""),
+			row("", "", "0", "0.00"),
+			row("Eastbury (Soft) Large 2 Seater", "", "1", "1118.00"),
+			row("NFX2S (A)", "", "1", "500.00"),
+			row("HAN3S (A)", "HANSSON 3 seater sofa", "1", "663.00"),
+		}},
+	}}
+
+	got := (&Scanner{Log: func(string, ...any) {}}).extractOrders([]Document{doc})[0].Products
+
+	want := []struct{ code, desc string }{
+		{"CA24", "Natural Indulge"},
+		{"", "Eastbury (Soft) Large 2 Seater"},
+		{"NFX2S (A)", ""},
+		{"HAN3S (A)", "HANSSON 3 seater sofa"},
+	}
+	if len(got) != len(want) {
+		t.Fatalf("extracted %d lines, want %d: the blank rows must be dropped", len(got), len(want))
+	}
+	for i, w := range want {
+		if got[i].Code != w.code || got[i].Description != w.desc {
+			t.Errorf("line %d = (%q, %q), want (%q, %q)", i, got[i].Code, got[i].Description, w.code, w.desc)
 		}
 	}
 }

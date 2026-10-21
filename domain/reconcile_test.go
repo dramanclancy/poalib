@@ -21,8 +21,14 @@ func embed(s string) []float32 {
 }
 
 // order builds both sides with embeddings attached, the way the pipeline does
-// before calling Reconcile.
+// before calling Reconcile. A BC order with no total gets the sum of its
+// lines, as BC's own header carries — the write gate reads it.
 func order(poa POAOrder, bc BCOrder) (POAOrder, BCOrder) {
+	if bc.TotalExVAT == 0 {
+		for _, b := range bc.Products {
+			bc.TotalExVAT += b.Net
+		}
+	}
 	for i := range poa.Products {
 		poa.Products[i].Embedding = embed(poa.Products[i].Text())
 	}
@@ -132,12 +138,12 @@ func TestReconcile_MarginIgnoresCandidatesTakenByAnotherLine(t *testing.T) {
 	}
 }
 
-// TestReconcile_UnacknowledgedBCLineIsReportedNotGated pins the write gate's
-// documented blind spot: a BC line the supplier never acknowledged is
-// reported, but does not by itself stop the order auto-approving. Changing
-// this changes which orders auto-approve and is a deliberate decision, not a
-// tidy-up — so it must fail loudly if changed by accident.
-func TestReconcile_UnacknowledgedBCLineIsReportedNotGated(t *testing.T) {
+// TestReconcile_UnacknowledgedChargeBlocksThroughTheTotal: PF131540. BC's
+// Vendor Surcharges line is not on the acknowledgement, every product agrees,
+// and the order total is short by the surcharge. It used to auto-approve;
+// the owner decided (2026-10-21) that a total that does not agree needs a
+// human.
+func TestReconcile_UnacknowledgedChargeBlocksThroughTheTotal(t *testing.T) {
 	poa, bc := order(
 		POAOrder{PF: "PF-PARTIAL", Products: []POAProduct{
 			{Code: "Metro 3 Seater Digby Beige", Qty: 1, UnitPrice: 500, LineTotal: Ptr(500.0)},
@@ -154,8 +160,30 @@ func TestReconcile_UnacknowledgedBCLineIsReportedNotGated(t *testing.T) {
 	if len(r.UnmatchedBC) != 1 || r.UnmatchedBC[0].ItemNo != "718000" {
 		t.Fatalf("unmatchedBC = %d, want the surcharge line reported", len(r.UnmatchedBC))
 	}
+	if r.WriteOK {
+		t.Error("WriteOK = true; an order total short by an unacknowledged surcharge must not auto-approve")
+	}
+}
+
+// TestReconcile_RoundingOnTheTotalDoesNotBlock: the Totals check reports a
+// gap from OrderTolerance up, but the gate allows MoneyTolerance — PF131228
+// was out by 0.04 on a 655.35 order whose every line agreed.
+func TestReconcile_RoundingOnTheTotalDoesNotBlock(t *testing.T) {
+	poa, bc := order(
+		POAOrder{PF: "PF-ROUND", TotalExVAT: Ptr(499.96), Products: []POAProduct{
+			{Code: "Metro 3 Seater Digby Beige", Qty: 1, UnitPrice: 500, LineTotal: Ptr(500.0)},
+		}},
+		BCOrder{VendorNo: "VX1", TotalExVAT: 500, Enrichment: EnrichmentApplied, Products: []BCProduct{
+			bcProduct("bc-1", "IT1", "Metro 3 Seater Digby Beige", 1, 500, 500),
+		}},
+	)
+
+	r := Reconcile(poa, bc, cfg())
+	if !r.Totals.Failed() {
+		t.Errorf("totals = %q, want the 0.04 gap still reported", r.Totals.Status)
+	}
 	if !r.WriteOK {
-		t.Error("WriteOK = false; the gate does not consider unacknowledged BC lines — if that changed deliberately, update this test and the architecture doc")
+		t.Error("WriteOK = false; a 0.04 rounding gap on the total must not block")
 	}
 }
 
@@ -272,5 +300,58 @@ func TestReconcile_PriceNeverDecidesPairingOnLargeOrders(t *testing.T) {
 		if !r.Products[0].Price.Failed() {
 			t.Errorf("limit %d: the price difference was not reported", limit)
 		}
+	}
+}
+
+// TestReconcile_ZeroValueLineNeverPairsWithACharge: PF130268. The supplier
+// printed a free-text note at 0.00 and left off BC's surcharge; by elimination
+// the note was paired with the surcharge and reported as a price difference.
+// The note now stays unmatched and the surcharge unacknowledged.
+func TestReconcile_ZeroValueLineNeverPairsWithACharge(t *testing.T) {
+	surcharge := bcProduct("bc-2", "", "Vendor Surcharges", 1, 14.92, 14.92)
+	surcharge.LineType = "Account"
+	poa, bc := order(
+		POAOrder{PF: "PF-NOTE", Products: []POAProduct{
+			product("HANSSON 3 seater sofa", 1, 663),
+			product("HANSSON Customer Note QUICKSHIP ORDER", 1, 0),
+		}},
+		BCOrder{VendorNo: "VX1", TotalExVAT: 677.92, Enrichment: EnrichmentApplied, Products: []BCProduct{
+			bcProduct("bc-1", "IT1", "3 Seater Sofa HANSSON", 1, 663, 663),
+			surcharge,
+		}},
+	)
+
+	r := Reconcile(poa, bc, cfg())
+	if len(r.Products) != 1 || r.Products[0].BC.LineID != "bc-1" {
+		t.Fatalf("want only the sofa paired, got %d pairs", len(r.Products))
+	}
+	if len(r.UnmatchedPOA) != 1 || len(r.UnmatchedBC) != 1 || r.UnmatchedBC[0].LineID != "bc-2" {
+		t.Errorf("want the note unmatched and the surcharge unacknowledged, got %d / %d",
+			len(r.UnmatchedPOA), len(r.UnmatchedBC))
+	}
+	if !strings.Contains(r.Totals.Message, "does not list") || !strings.Contains(r.Totals.Message, "the lines it does list agree") {
+		t.Errorf("totals message should attribute the difference to the surcharge: %s", r.Totals.Message)
+	}
+}
+
+// TestReconcile_ChargedLineStillPairsWithACharge: a supplier surcharge that
+// carries money is a charge, and may still pair with BC's.
+func TestReconcile_ChargedLineStillPairsWithACharge(t *testing.T) {
+	surcharge := bcProduct("bc-2", "", "Vendor Surcharges", 1, 30, 30)
+	surcharge.LineType = "Account"
+	poa, bc := order(
+		POAOrder{PF: "PF-SUR", Products: []POAProduct{
+			product("Boston chair", 1, 700),
+			product("4.5% TEMPORARY SURCHARGE", 1, 30),
+		}},
+		BCOrder{VendorNo: "VX1", Enrichment: EnrichmentApplied, Products: []BCProduct{
+			bcProduct("bc-1", "IT1", "Boston chair", 1, 700, 700),
+			surcharge,
+		}},
+	)
+
+	r := Reconcile(poa, bc, cfg())
+	if len(r.Products) != 2 || len(r.UnmatchedPOA) != 0 {
+		t.Errorf("want both lines paired, got %d pairs, %d unmatched", len(r.Products), len(r.UnmatchedPOA))
 	}
 }

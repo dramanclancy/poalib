@@ -38,7 +38,9 @@
 //	          anchor at least as much as anything else still in play, and
 //	          the combined money agrees. The weak description is still
 //	          flagged on the row, so this changes what the flag says, never
-//	          whether the order auto-approves.
+//	          whether the order auto-approves — with one exception, a charge
+//	          folded into a product's price (foldCharges): a duty or
+//	          surcharge line has no product to identify.
 //
 // A sum group without matching descriptions needs the money to agree; a
 // parts group always does, by construction. Nothing else forms a group, so a
@@ -318,6 +320,9 @@ func (s *groupSearch) aggregateCandidates(j int) ([]groupMember, int) {
 			continue
 		}
 		toAnchor := s.at[[2]int{i, j}]
+		if toAnchor.ruledOut {
+			continue
+		}
 		k, paired := s.poaPartner[i]
 		m := groupMember{groupLine: poaGroupLine(i, p), sim: orZero(toAnchor.ev.Similarity)}
 		switch s.standing(toAnchor, s.at[[2]int{i, k}], paired, k == j) {
@@ -395,6 +400,9 @@ func (s *groupSearch) splitCandidates(i int) ([]groupMember, int) {
 			continue
 		}
 		toAnchor := s.at[[2]int{i, j}]
+		if toAnchor.ruledOut {
+			continue
+		}
 		k, paired := s.bcPartner[j]
 		m := groupMember{groupLine: bcGroupLine(j, b), sim: orZero(toAnchor.ev.Similarity)}
 		switch s.standing(toAnchor, s.at[[2]int{k, j}], paired, k == i) {
@@ -687,4 +695,84 @@ func (p *ProductResult) applyGroup(g *LineGroup, poa POAOrder, bc BCOrder, cfg C
 	p.Quantity = groupQuantityCheck(*g, poas, bcs)
 	p.Price = groupPriceCheck(poas, bcs, cfg)
 	p.Price.POAUnitPrice, p.Price.BCUnitPrice = p.POA.UnitPrice, p.BC.UnitCost
+}
+
+// foldCharges turns the failed description on a group's charge line into a
+// warning: a duty, surcharge or carriage line that one side itemises and the
+// other carries inside a product's price.
+//
+// PF131672: Asiatic Carpets print the rug at 226.32 and "DUTY" at 18.11; BC
+// holds the rug at 244.43. The group forms on money and the rug is identified
+// by its code, but the duty line scored 0.14 against the rug and blocked the
+// order — a Review row asking someone to confirm that duty is not a rug.
+//
+// Every condition is structural, never a word list:
+//
+//   - the group's combined money agrees, so the charge is verified as money;
+//   - another line of the group is identified on its own, so the product the
+//     charge belongs to is known;
+//   - the line is not a product. A BC line says so by its type (isChargeLine).
+//     A POA line has no type, so it must carry no product code and resemble
+//     no BC product at all — below DescThreshold against every one, the bar
+//     that separates "has comparable description text" from "does not".
+//
+// A real product with a weak description keeps its flag: the divan halves of
+// PF131012 print IN20 and resemble the base, and no line beside them is
+// identified.
+func foldCharges(rows []ProductResult, pairs []pairing, cfg Config) {
+	byGroup := map[*LineGroup][]int{}
+	for n, r := range rows {
+		if r.Group != nil {
+			byGroup[r.Group] = append(byGroup[r.Group], n)
+		}
+	}
+	for g, ns := range byGroup {
+		identified := false
+		for _, n := range ns {
+			identified = identified || !rows[n].Description.Failed()
+		}
+		if !identified || rows[ns[0]].Price.Failed() {
+			continue
+		}
+		for _, n := range ns {
+			r := &rows[n]
+			if !r.Description.Failed() || !isFoldedCharge(*r, g.Kind, pairs, cfg) {
+				continue
+			}
+			r.Description.FoldedCharge = true
+			r.Description.Status = StatusWarning
+			if g.Kind == GroupSplit {
+				r.Description.Message = fmt.Sprintf(
+					"BC charge line %q is carried inside the acknowledged price of this product; the combined net value agrees",
+					r.BC.Description)
+			} else {
+				r.Description.Message = fmt.Sprintf(
+					"a charge the supplier itemises separately (no product code, resembles no BC product), carried inside BC %s's price; the combined net value agrees",
+					r.BC.Label())
+			}
+		}
+	}
+}
+
+// isFoldedCharge reports whether a group row's line on the many side is a
+// charge rather than a product. See foldCharges.
+func isFoldedCharge(r ProductResult, kind GroupKind, pairs []pairing, cfg Config) bool {
+	if kind == GroupSplit {
+		return isChargeLine(r.BC)
+	}
+	if productCodeIn(r.POA.Text(), cfg) != "" {
+		return false
+	}
+	seen := false
+	for _, p := range pairs {
+		if p.poaIndex != r.POAIndex {
+			continue
+		}
+		// No embedding is no evidence: fail closed, as descriptionCheck does.
+		if p.ev.Similarity == nil || *p.ev.Similarity >= cfg.DescThreshold {
+			return false
+		}
+		seen = true
+	}
+	return seen
 }

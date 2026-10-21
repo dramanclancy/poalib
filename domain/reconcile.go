@@ -10,6 +10,7 @@ package domain
 
 import (
 	"fmt"
+	"math"
 	"sort"
 )
 
@@ -124,13 +125,15 @@ func (p ProductResult) Discrepancies() []Discrepancy {
 // products, and a reviewer answers those separately.
 //
 // Skipped entirely when a code matched — identity is settled by the code, so a
-// low description score against it is expected, not a discrepancy.
+// low description score against it is expected, not a discrepancy. Likewise
+// for a charge folded into a group (see foldCharges): it has no product
+// description to compare.
 func (p ProductResult) identityDiscrepancies() []Discrepancy {
 	d := p.Description
 	var ds []Discrepancy
 	add := func(k DiscrepancyKind, msg string) { ds = append(ds, Discrepancy{Kind: k, Message: msg}) }
 
-	if !d.CodeMatch {
+	if !d.CodeMatch && !d.FoldedCharge {
 		if orZero(d.SimilarityScore) < d.Threshold {
 			// The message the check already reached, rather than a second
 			// wording maintained alongside it.
@@ -169,6 +172,10 @@ type Result struct {
 	Products []ProductResult `json:"products"`
 	// UnmatchedPOA is what the supplier acknowledged that could not be paired.
 	UnmatchedPOA []POAProduct `json:"unmatchedPOA"`
+	// UnmatchedLines says what each unmatched acknowledgement line appears to
+	// be — note, charge or product — whether it blocks, and the evidence.
+	// One entry per UnmatchedPOA line, in the same order.
+	UnmatchedLines []UnmatchedLine `json:"unmatchedLines"`
 	// UnmatchedBC is what the order asked for that the acknowledgement never
 	// mentioned — reported so a review can name the line, not merely count it.
 	UnmatchedBC []BCProduct `json:"unmatchedBC"`
@@ -217,7 +224,7 @@ func Reconcile(poa POAOrder, bc BCOrder, cfg Config) Result {
 		}
 	}
 
-	links := assign(pairs, len(poa.Products), len(bc.Products), cfg)
+	links := withoutRuledOut(assign(pairs, len(poa.Products), len(bc.Products), cfg), pairs)
 	final := settle(pairs, links, poa, bc, cfg)
 
 	// The assignment could only express one line per product on each side.
@@ -232,9 +239,11 @@ func Reconcile(poa POAOrder, bc BCOrder, cfg Config) Result {
 		usedPOA[m.POAIndex], usedBC[m.BCIndex] = true, true
 	}
 	var unmatchedPOA []POAProduct
+	var unmatchedIdx []int
 	for i, p := range poa.Products {
 		if !usedPOA[i] {
 			unmatchedPOA = append(unmatchedPOA, p)
+			unmatchedIdx = append(unmatchedIdx, i)
 		}
 	}
 	var unmatchedBC []BCProduct
@@ -243,16 +252,20 @@ func Reconcile(poa POAOrder, bc BCOrder, cfg Config) Result {
 			unmatchedBC = append(unmatchedBC, b)
 		}
 	}
+	lines := classifyUnmatched(poa, unmatchedIdx, pairs, final, unmatchedBC, cfg)
+	totals := totalsCheck(poa, bc, final, unmatchedPOA, unmatchedBC, cfg)
+	totals.addChargeShare(poa, lines)
 
 	return Result{
-		POA:          poa,
-		BC:           bc,
-		Products:     final,
-		UnmatchedPOA: unmatchedPOA,
-		UnmatchedBC:  unmatchedBC,
-		Totals:       totalsCheck(poa, bc, final, unmatchedPOA, cfg),
-		WriteOK:      writeOK(final, unmatchedPOA),
-		Config:       cfg,
+		POA:            poa,
+		BC:             bc,
+		Products:       final,
+		UnmatchedPOA:   unmatchedPOA,
+		UnmatchedLines: lines,
+		UnmatchedBC:    unmatchedBC,
+		Totals:         totals,
+		WriteOK:        writeOK(final, lines, totals, cfg),
+		Config:         cfg,
 	}
 }
 
@@ -261,6 +274,24 @@ func Reconcile(poa POAOrder, bc BCOrder, cfg Config) Result {
 type link struct {
 	poa, bc int
 	group   *LineGroup
+}
+
+// withoutRuledOut drops chosen links that cannot be the same line, leaving
+// both sides unmatched.
+//
+// After assignment, not inside it: the assignment maximises total score, so
+// barring a pair there reshuffles everything else to fill the gap. On
+// PF130268 it moved the sofa onto the surcharge so the leftover note could
+// take the sofa — a higher total from two wrong pairs.
+func withoutRuledOut(links []link, pairs []pairing) []link {
+	at := pairIndex(pairs)
+	out := links[:0:0]
+	for _, l := range links {
+		if !at[[2]int{l.poa, l.bc}].ruledOut {
+			out = append(out, l)
+		}
+	}
+	return out
 }
 
 // regroup replaces every link that touches a grouped line with the group's
@@ -310,6 +341,7 @@ func settle(pairs []pairing, links []link, poa POAOrder, bc BCOrder, cfg Config)
 		}
 		out = append(out, r)
 	}
+	foldCharges(out, pairs, cfg)
 	sort.Slice(out, func(i, j int) bool {
 		if out[i].POAIndex != out[j].POAIndex {
 			return out[i].POAIndex < out[j].POAIndex
@@ -319,15 +351,33 @@ func settle(pairs []pairing, links []link, poa POAOrder, bc BCOrder, cfg Config)
 	return out
 }
 
-// writeOK is the gate: every acknowledged line paired, and every pair clean.
+// writeOK is the gate: every acknowledged line paired or harmless, every pair
+// clean, and the order total agreeing with BC's.
 //
-// It deliberately ignores the order total and the BC lines the supplier never
-// acknowledged. That is documented intentional behaviour, not an oversight —
-// tightening it changes which orders auto-approve, which is a decision to take
-// deliberately and measure over the corpus, not a tidy-up.
-func writeOK(matched []ProductResult, unmatchedPOA []POAProduct) bool {
-	if len(unmatchedPOA) > 0 {
+// The total used to be ignored, so an order whose every product agreed passed
+// even when the money did not: PF131540 (Alstons) was accepted with BC's
+// Vendor Surcharges 28.95 nowhere on the acknowledgement. Measured on the
+// corpus (2026-10-21, 311 fixtures) the gate now stops 26 more, all of that
+// shape — a BC charge the supplier never lists. A BC line the supplier never
+// mentions is caught the same way, through the total it leaves short.
+//
+// The gate allows MoneyTolerance (0.05), not OrderTolerance (0.02): the
+// Totals check still reports a 0.02-0.04 rounding gap, but two such orders
+// (PF129209 +0.02, PF131228 -0.04) are not worth a human. The owner chose
+// this; both tolerances are captured in every fixture, so a replay applies
+// the same bar a live run did.
+//
+// An unmatched line blocks unless it is a note carrying no money while every
+// ordered item is acknowledged (see classifyUnmatched). A charge always
+// blocks: it is money the order does not hold.
+func writeOK(matched []ProductResult, unmatched []UnmatchedLine, totals TotalsCheckResult, cfg Config) bool {
+	if math.Abs(totals.Difference) >= cfg.MoneyTolerance {
 		return false
+	}
+	for _, l := range unmatched {
+		if l.Blocks {
+			return false
+		}
 	}
 	for _, m := range matched {
 		if !m.OK() {

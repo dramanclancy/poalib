@@ -99,6 +99,22 @@ func matchColumns(cfg domain.Config) []column {
 			Value:    func(m domain.ProductResult) any { return m.POA.DiscountAmount },
 		},
 		{
+			Header:   "POA Further Discount %",
+			Meaning:  "A second percentage discount the supplier states, after the first.",
+			Source:   "The acknowledgement line's further discount percentage field.",
+			Calc:     "Taken verbatim. Compounds: applied to the line after the first discount, never to the gross (10% then 5% is 0.90 × 0.95).",
+			Decision: "Used for POA Net only when no further cash discount is printed — like the first discount, the two are one discount expressed two ways.",
+			Value:    func(m domain.ProductResult) any { return m.POA.FurtherDiscountPercent },
+		},
+		{
+			Header:   "POA Further Discount Amount",
+			Meaning:  "A second cash discount the supplier states, after the first.",
+			Source:   "The acknowledgement line's further discount amount field.",
+			Calc:     "Taken verbatim, and subtracted from the line after the first discount.",
+			Decision: "Takes precedence over the further percentage when both are present.",
+			Value:    func(m domain.ProductResult) any { return m.POA.FurtherDiscountAmount },
+		},
+		{
 			Header:   "POA Line Total (printed)",
 			Meaning:  "The line total the supplier printed. Blank means the supplier prints no such column.",
 			Source:   "The acknowledgement line's total field.",
@@ -228,6 +244,15 @@ func matchColumns(cfg domain.Config) []column {
 			Calc:     "Recorded when a code match is found. It stays filled in even if the match was later withdrawn as ambiguous, so the reason is auditable.",
 			Decision: "Audit only. A Vendor_Item_No added to the BC item record is what turns a description-only match into a code match on future orders.",
 			Value:    func(m domain.ProductResult) any { return m.Description.CodeMatchSource },
+		},
+		{
+			Header:  "POA Code = Vendor Item No",
+			Meaning: "Whether the code the supplier printed in its Product column is the BC item's Vendor_Item_No.",
+			Source:  "The POA Product Code column, against the item's Vendor_Item_No from item enrichment.",
+			Calc: fmt.Sprintf("Both reduced to letters and digits. \"exact\" when the Product column, or one word of it, equals the Vendor_Item_No; \"prefix\" when it begins with it (C260-P against C260); blank otherwise, or when the Vendor_Item_No is under %d characters. Unlike Code Match there is no %d-character floor and no check that the item belongs to this order's vendor.",
+				cfg.MinProductCodeLen, cfg.MinCodeLen),
+			Decision: "Information only — it does not affect pairing or any verdict. A line with Code Match FALSE but a value here identifies the item by code even though the engine relied on the description; check pairings against it.",
+			Value:    func(m domain.ProductResult) any { return m.Description.VendorItemNoMatch },
 		},
 		{
 			Header:   "Code Data State",

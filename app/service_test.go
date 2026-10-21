@@ -34,6 +34,7 @@ func (o fakeOrders) Order(_ context.Context, pf string) (domain.BCOrder, OrderSt
 	return domain.BCOrder{
 		PF:         pf,
 		Enrichment: domain.EnrichmentApplied,
+		TotalExVAT: 100,
 		Products:   []domain.BCProduct{{ItemNo: "IT1", LineType: "Item", Description: pf + " sofa", Qty: 1, UnitCost: 100, Net: 100}},
 	}, OrderStats{EnrichmentAsked: true}, nil
 }
@@ -223,5 +224,27 @@ func TestRunRecord_Degradations(t *testing.T) {
 				t.Errorf("Degraded() = %v", r.Degraded())
 			}
 		})
+	}
+}
+
+// TestService_MergesScansPrintingTheSameOrderDifferently: one file printing
+// "131425" on one acknowledgement and " pf131425" on another is one purchase
+// order. Normalised after grouping, each half was reconciled against the whole
+// order as though the other did not exist.
+func TestService_MergesScansPrintingTheSameOrderDifferently(t *testing.T) {
+	scans := []domain.POAOrder{
+		{PF: "131425", Products: []domain.POAProduct{line("PF131425 sofa", 1, 100)}},
+		{PF: " pf131425", Products: []domain.POAProduct{line("PF131425 footstool", 1, 40)}},
+	}
+	out, err := newService(scans, fakeOrders{}, &oneHotEmbedder{axis: map[string]int{}}).
+		Analyze(context.Background(), "POA/x.pdf", "Model")
+	if err != nil {
+		t.Fatalf("Analyze: %v", err)
+	}
+	if len(out) != 1 || out[0].PF != "PF131425" {
+		t.Fatalf("outcomes = %v, want one PF131425", pfs(out))
+	}
+	if got := len(out[0].Result.POA.Products); got != 2 {
+		t.Errorf("PF131425 has %d lines, want both acknowledgements' lines (2)", got)
 	}
 }

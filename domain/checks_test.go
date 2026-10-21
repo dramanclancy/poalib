@@ -1,6 +1,7 @@
 package domain
 
 import (
+	"math"
 	"strings"
 	"testing"
 )
@@ -349,7 +350,7 @@ func TestTotalsCheck_UsesTheOrderTolerance(t *testing.T) {
 		{100.00, 100.03, false}, // outside it, though inside the per-line tolerance
 	}
 	for _, tc := range tests {
-		got := totalsCheck(POAOrder{TotalExVAT: Ptr(tc.poaTotal)}, BCOrder{TotalExVAT: tc.bcTotal}, nil, nil, c)
+		got := totalsCheck(POAOrder{TotalExVAT: Ptr(tc.poaTotal)}, BCOrder{TotalExVAT: tc.bcTotal}, nil, nil, nil, c)
 		if !got.Failed() != tc.wantOK {
 			t.Errorf("POA %.3f vs BC %.3f: status %q, want ok=%v at tolerance %.2f",
 				tc.poaTotal, tc.bcTotal, got.Status, tc.wantOK, c.OrderTolerance)
@@ -362,12 +363,70 @@ func TestTotalsCheck_DerivesTotalFromLines(t *testing.T) {
 		{Qty: 2, UnitPrice: 100},
 		{Qty: 1, UnitPrice: 50, DiscountPercent: 10},
 	}}
-	got := totalsCheck(poa, BCOrder{TotalExVAT: 245}, nil, nil, cfg())
+	got := totalsCheck(poa, BCOrder{TotalExVAT: 245}, nil, nil, nil, cfg())
 	if got.TotalSource != "derived from lines" {
 		t.Errorf("TotalSource = %q", got.TotalSource)
 	}
 	if got.Failed() {
 		t.Errorf("status = %q (%s), want a match: 200 + 45 = 245", got.Status, got.Message)
+	}
+}
+
+// TestPOAProduct_FurtherDiscountCompounds: a further discount applies to what
+// the first discount left, never to the gross, and Net and UnitNet agree.
+func TestPOAProduct_FurtherDiscountCompounds(t *testing.T) {
+	cases := []struct {
+		name    string
+		p       POAProduct
+		wantNet float64
+	}{
+		{"10% then a further 5%", POAProduct{Qty: 2, UnitPrice: 100, DiscountPercent: 10, FurtherDiscountPercent: 5}, 171},
+		{"cash 20 then a further 5%", POAProduct{Qty: 2, UnitPrice: 100, DiscountAmount: 20, FurtherDiscountPercent: 5}, 171},
+		{"10% then a further 18 cash", POAProduct{Qty: 2, UnitPrice: 100, DiscountPercent: 10, FurtherDiscountAmount: 18}, 162},
+		{"further discount alone", POAProduct{Qty: 2, UnitPrice: 100, FurtherDiscountPercent: 5}, 190},
+		{"further cash wins over further %", POAProduct{Qty: 2, UnitPrice: 100, FurtherDiscountPercent: 50, FurtherDiscountAmount: 10}, 190},
+	}
+	for _, tc := range cases {
+		if got := tc.p.Net(); math.Abs(got-tc.wantNet) > 1e-9 {
+			t.Errorf("%s: Net = %.4f, want %.4f", tc.name, got, tc.wantNet)
+		}
+		if got := tc.p.UnitNet() * float64(tc.p.Qty); math.Abs(got-tc.wantNet) > 1e-9 {
+			t.Errorf("%s: UnitNet × qty = %.4f, want %.4f (Net and UnitNet must agree)", tc.name, got, tc.wantNet)
+		}
+	}
+}
+
+// TestTotalsCheck_OrderDiscount: the discount comes off the ex-VAT total once,
+// whether or not the printed total already has it taken off — the document's
+// own figures say which.
+func TestTotalsCheck_OrderDiscount(t *testing.T) {
+	lines := []POAProduct{{Qty: 1, UnitPrice: 199}, {Qty: 1, UnitPrice: 59}} // 258.00
+	cases := []struct {
+		name       string
+		total      *float64
+		discount   float64
+		percent    bool
+		wantTotal  float64
+		wantSource string
+	}{
+		{"printed total before discount", Ptr(258.0), 25.80, false, 232.20, "stated on document, less order discount"},
+		{"printed total already discounted", Ptr(232.20), 25.80, false, 232.20, "stated on document, order discount already deducted"},
+		{"percentage off the printed total", Ptr(258.0), 10, true, 232.20, "stated on document, less order discount"},
+		{"percentage, already deducted", Ptr(232.20), 10, true, 232.20, "stated on document, order discount already deducted"},
+		{"no printed total", nil, 25.80, false, 232.20, "derived from lines, less order discount"},
+	}
+	for _, tc := range cases {
+		poa := POAOrder{TotalExVAT: tc.total, OrderDiscount: Ptr(tc.discount), OrderDiscountIsPercent: tc.percent, Products: lines}
+		got := totalsCheck(poa, BCOrder{TotalExVAT: 232.20}, nil, nil, nil, cfg())
+		if math.Abs(got.POATotal-tc.wantTotal) > 0.001 || got.TotalSource != tc.wantSource {
+			t.Errorf("%s: total %.2f (%s), want %.2f (%s)", tc.name, got.POATotal, got.TotalSource, tc.wantTotal, tc.wantSource)
+		}
+		if got.Failed() {
+			t.Errorf("%s: %s, want the discounted total to agree with BC's 232.20", tc.name, got.Message)
+		}
+		if d := poa.OrderDiscountValue(); math.Abs(d-25.80) > 0.001 {
+			t.Errorf("%s: discount value %.2f, want 25.80", tc.name, d)
+		}
 	}
 }
 
@@ -385,5 +444,24 @@ func TestOrientationCheck_HeaderIsNotASpecification(t *testing.T) {
 	}
 	if got.BCOrientation != "LHF" {
 		t.Errorf("BC orientation = %q, want LHF from the comment line", got.BCOrientation)
+	}
+}
+
+// TestTotalsCheck_NamesWhatTheAcknowledgementLeftOut: PF131425 arrived as two
+// acknowledgements, each reconciled against the whole order. The message must
+// separate the lines missing from this document from a real money difference.
+func TestTotalsCheck_NamesWhatTheAcknowledgementLeftOut(t *testing.T) {
+	missing := []BCProduct{
+		{ItemNo: "IT1", Net: 1000},
+		{ItemNo: "IT2", Net: 500},
+	}
+	got := totalsCheck(POAOrder{TotalExVAT: Ptr(380.0)}, BCOrder{TotalExVAT: 1890}, nil, nil, missing, cfg())
+	if !got.Failed() {
+		t.Fatalf("status = %q, want a mismatch: the order still does not total", got.Status)
+	}
+	for _, want := range []string{"-1500.00 is 2 BC line(s)", "IT1 1000.00", "-10.00 is on the lines it does list"} {
+		if !strings.Contains(got.Message, want) {
+			t.Errorf("message lacks %q: %s", want, got.Message)
+		}
 	}
 }

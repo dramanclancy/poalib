@@ -8,6 +8,7 @@ package excel
 
 import (
 	"fmt"
+	"strings"
 
 	"github.com/dramanclancy/poalib/app"
 	"github.com/dramanclancy/poalib/domain"
@@ -175,23 +176,28 @@ func writeSummary(f *excelize.File, st styles, res domain.Result, run app.RunRec
 	section("Verdict")
 	verdictRow := row
 	put("Accepted without review", res.WriteOK,
-		"TRUE only when every acknowledged line was paired and every check passed. Unacknowledged BC lines and the order total are deliberately NOT part of this gate.")
+		"TRUE only when every check passed and every acknowledged line was paired, apart from notes carrying no money (see the Unmatched POA sheet). The order total must also agree with BC's within the line tolerance, so an unacknowledged BC line or surcharge stops acceptance through the total it leaves short.")
 	_ = f.SetCellStyle(sheetSummary, cell(2, verdictRow), cell(2, verdictRow), map[bool]int{true: st.okBox, false: st.warnBox}[res.WriteOK])
 	put("Lines matched", run.LinesMatched, "Pairs of an acknowledgement line with a purchase order line. A line in a split or aggregated group is counted once per line on the other side.")
 	put("Lines in split/aggregated groups", groupedRows(res), "Pairs where the supplier and the order lay one product out as different numbers of lines (see the Line Group column on Matches). Quantity and price are checked on each group's combined figures.")
 	put("Lines needing review", flagged, "Lines where at least one check failed. See the Review sheet.")
-	put("POA lines not matched", len(res.UnmatchedPOA), "Acknowledged lines with no counterpart on the order. Any of these blocks acceptance.")
+	put("POA lines not matched", len(res.UnmatchedPOA), "Acknowledged lines with no counterpart on the order: notes, supplier charges or products. See the Unmatched POA sheet.")
+	put("…of which block acceptance", blockingUnmatched(res), "Every unmatched line carrying money blocks. A note carrying no money blocks only while an ordered item is unacknowledged.")
 	put("BC lines not acknowledged", len(res.UnmatchedBC), "Order lines the supplier never mentioned. Reported, but does not block acceptance.")
 
 	section("Order totals")
 	put("POA total (ex VAT)", res.Totals.POATotal, "")
-	put("Where that total came from", res.Totals.TotalSource, "\"stated on document\" or, when the supplier prints no total, summed from the lines.")
+	put("Where that total came from", res.Totals.TotalSource, "\"stated on document\" or, when the supplier prints no total, summed from the lines. Notes whether an order discount was deducted here or was already deducted on the document.")
+	if d := res.POA.OrderDiscountValue(); d != 0 {
+		put("Order discount (ex VAT)", d, "A discount the supplier takes off the order total rather than any line. Already reflected in the POA total above.")
+	}
 	put("BC total (ex VAT)", res.Totals.BCTotal, "")
 	put("Difference", res.Totals.Difference, "POA total minus BC total.")
 	totalsRow := row
-	put("Totals agree", !res.Totals.Failed(), fmt.Sprintf("Compared within %.2f. This does not affect acceptance.", res.Totals.Tolerance))
+	put("Totals agree", !res.Totals.Failed(), fmt.Sprintf("Compared within %.2f. A difference of %.2f or more stops automatic acceptance.", res.Totals.Tolerance, res.Config.MoneyTolerance))
 	if res.Totals.Failed() {
 		_ = f.SetCellStyle(sheetSummary, cell(2, totalsRow), cell(2, totalsRow), st.red)
+		put("Why the totals differ", res.Totals.Message, "How much of the difference is order lines this acknowledgement does not list, and how much is on the lines it does. A large unlisted share usually means a second acknowledgement or an unacknowledged surcharge.")
 	}
 	put("Value of matched BC lines", res.Totals.MatchedTotal, "Short of the BC total means part of the order was never acknowledged.")
 
@@ -307,16 +313,31 @@ func writeMatches(f *excelize.File, st styles, res domain.Result, cols []column)
 func writeUnmatchedPOA(f *excelize.File, st styles, res domain.Result) {
 	header(f, st, sheetUnmatchedPOA,
 		"Product Code", "Description (as extracted)", "Qty", "Unit Price",
-		"Discount %", "Discount Amount", "Line Total (printed)", "Net")
-	for i, d := range res.UnmatchedPOA {
+		"Discount %", "Discount Amount", "Line Total (printed)", "Net",
+		"Reads As", "Blocks Acceptance", "Why", "Evidence")
+	for i, l := range res.UnmatchedLines {
+		d := res.POA.Products[l.POAIndex]
 		var lineTotal interface{}
 		if total, ok := domain.Deref(d.LineTotal); ok {
 			lineTotal = total
 		}
 		_ = f.SetSheetRow(sheetUnmatchedPOA, fmt.Sprintf("A%d", i+2), &[]interface{}{
 			d.Code, d.Text(), d.Qty, d.UnitPrice, d.DiscountPercent, d.DiscountAmount, lineTotal, d.Net(),
+			string(l.Kind), l.Blocks, l.Message, strings.Join(l.Evidence, "; "),
 		})
 	}
+}
+
+// blockingUnmatched counts the unmatched acknowledgement lines that stop
+// automatic acceptance.
+func blockingUnmatched(res domain.Result) int {
+	n := 0
+	for _, l := range res.UnmatchedLines {
+		if l.Blocks {
+			n++
+		}
+	}
+	return n
 }
 
 // ---------------------------------------------------------------------------

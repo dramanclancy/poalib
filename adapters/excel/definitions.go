@@ -67,7 +67,7 @@ func otherDefinitions(cfg domain.Config) []definition {
 			Sheet: sheetSummary, Column: "Accepted without review",
 			Meaning:  "Whether this acknowledgement can be accepted with no human involvement.",
 			Source:   "Every check on every matched line, plus the count of acknowledged lines that could not be paired.",
-			Calc:     "TRUE when no check returned mismatch on any line AND every acknowledged line was paired. Warnings and \"no data\" results do not block.",
+			Calc:     "TRUE when no check returned mismatch on any line AND no unmatched acknowledgement line blocks. Every unmatched line carrying money blocks, supplier charges included; a note carrying no money blocks only while an ordered item is unacknowledged. Warnings and \"no data\" results do not block.",
 			Decision: "The whole point of the report. Note what it deliberately ignores: order lines the supplier never acknowledged, and a disagreement about the order total. Both are reported but neither blocks.",
 		},
 		{
@@ -103,7 +103,7 @@ func otherDefinitions(cfg domain.Config) []definition {
 			Meaning:  "Whether the supplier's order total matches the purchase order's.",
 			Source:   "The POA total (printed, or summed from lines) and BC's total excluding tax.",
 			Calc:     fmt.Sprintf("Compared within %.2f — tighter than the per-line tolerance, because the total is one figure both sides printed rather than a sum that accumulates rounding.", cfg.OrderTolerance),
-			Decision: "Reported for information. It does NOT affect acceptance: a supplier that omits a surcharge line will fail this while every line still agrees.",
+			Decision: fmt.Sprintf("A difference of %.2f or more stops automatic acceptance, even when every line agrees — a supplier that omits BC's surcharge line is caught here. Below that it is reported as rounding only.", cfg.MoneyTolerance),
 		},
 		{
 			Sheet: sheetSummary, Column: "Fixture capture enabled",
@@ -154,7 +154,28 @@ func otherDefinitions(cfg domain.Config) []definition {
 			Meaning:  "The full supplier text for a line that could not be paired with anything on the order.",
 			Source:   "The acknowledgement.",
 			Calc:     "Joined exactly as it would have been for comparison.",
-			Decision: "Any row on this sheet blocks automatic acceptance: the supplier acknowledged something the order does not appear to contain.",
+			Decision: "Whether the row blocks automatic acceptance is in Blocks Acceptance.",
+		},
+		{
+			Sheet: sheetUnmatchedPOA, Column: "Reads As",
+			Meaning:  "What the unmatched line appears to be: note, charge or product.",
+			Source:   "The line's own money, code and text, compared with every order line.",
+			Calc:     "note: the line carries no money. charge: it carries money, resembles no order line (below the description threshold against every one), and prints no product code or states a percentage. product: anything else carrying money.",
+			Decision: "Chooses the wording only. Whether the line blocks is decided by its money, never by this label.",
+		},
+		{
+			Sheet: sheetUnmatchedPOA, Column: "Blocks Acceptance",
+			Meaning:  "Whether this line stops the order being accepted without review.",
+			Source:   "Reads As and the BC lines nobody acknowledged.",
+			Calc:     "TRUE for every line carrying money, charges included. A note carrying no money is TRUE only while an ordered item is unacknowledged, since it might be that item.",
+			Decision: "A charge the order does not hold is still money someone must agree to; a zero-value note cannot change what is paid.",
+		},
+		{
+			Sheet: sheetUnmatchedPOA, Column: "Evidence",
+			Meaning:  "Each observation the Reads As label rests on: product code, best resemblance to an order line, and any stated percentage checked against the paired goods.",
+			Source:   "The acknowledgement and the comparison.",
+			Calc:     "A stated percentage is checked as that percentage of the supplier's net value of the lines that paired, within the money tolerance.",
+			Decision: "The audit trail for the classification. It is reported only, and never read back by a later run.",
 		},
 	}
 }

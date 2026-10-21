@@ -1,7 +1,6 @@
 package app
 
 import (
-	"encoding/json"
 	"flag"
 	"fmt"
 	"os"
@@ -52,11 +51,22 @@ func TestCorpus(t *testing.T) {
 	fixtures := loadCorpus(t)
 
 	var lines, flagged, degraded int
+	var stale []string
 	for _, f := range fixtures {
 		t.Run(f.PF, func(t *testing.T) {
 			got := domain.Reconcile(f.POA, f.BC, f.Config)
 			if diff := compareResults(f.Expected, got); diff != "" {
 				t.Errorf("replay differs from the captured result: %s", diff)
+			}
+			// -update rewrites expected and leaves the run record as captured,
+			// so after one the record's counters describe the engine that ran
+			// then, not the verdicts this fixture now asserts. That is
+			// expected, but a reader of the run record should not take its
+			// counts for the result's, so say where they part.
+			if m, fl := len(got.Products), len(got.Flagged()); f.Run.LinesMatched != m || f.Run.LinesFlagged != fl {
+				t.Logf("run record counted %d matched / %d flagged; the replay gives %d / %d",
+					f.Run.LinesMatched, f.Run.LinesFlagged, m, fl)
+				stale = append(stale, f.PF)
 			}
 			lines += len(got.Products)
 			flagged += len(got.Flagged())
@@ -70,6 +80,10 @@ func TestCorpus(t *testing.T) {
 	if lines > 0 {
 		t.Logf("corpus: %d orders, %d matched lines, %d flagged (%.0f%%), %d orders ran degraded",
 			len(fixtures), lines, flagged, 100*float64(flagged)/float64(lines), degraded)
+	}
+	if len(stale) > 0 {
+		t.Logf("%d fixtures' run counters disagree with their replay (expected regenerated since capture?): %s",
+			len(stale), strings.Join(stale, " "))
 	}
 }
 
@@ -117,7 +131,7 @@ func TestCorpus_SplitAndAggregatedLines(t *testing.T) {
 		why          string
 	}{
 		{"PF131114", true, 1, 0, "two wing-chair lines are BC's one line of 2"},
-		{"PF131048", false, 2, 5, "Eastbury and arm caps aggregate; '-' lines and free scatter packs stay unmatched"},
+		{"PF131048", true, 2, 5, "Eastbury and arm caps aggregate; '-' lines and free scatter packs stay unmatched, as notes carrying no money that do not block"},
 		{"PF130794", true, 0, 0, "a Zip & Link mattress acknowledged as 2 parts at half BC's unit price"},
 		{"PF130999", true, 0, 0, "the same Zip & Link mattress on a later order"},
 		{"PF131012", false, 1, 0, "two divan halves are one base; descriptions too weak to approve"},
@@ -232,8 +246,9 @@ func kindList(ds []domain.Discrepancy) string {
 // rewriteCorpus replays every fixture and writes the new result back into it,
 // leaving the captured inputs — both orders, the embeddings, the run record
 // and the thresholds — untouched. Only Expected changes. It re-encodes with
-// the same MarshalIndent the capture path uses, so a fixture whose verdicts
-// did not move comes back byte-identical and the diff shows exactly what did.
+// the same encodeFixture the capture path uses, in the schema the file already
+// has, so a fixture whose verdicts did not move comes back byte-identical and
+// the diff shows exactly what did.
 func rewriteCorpus(t *testing.T) {
 	t.Helper()
 	paths, err := filepath.Glob(filepath.Join(corpusDir(), "*.json"))
@@ -246,7 +261,7 @@ func rewriteCorpus(t *testing.T) {
 			t.Fatalf("loading %s: %v", p, err)
 		}
 		f.Expected = domain.Reconcile(f.POA, f.BC, f.Config)
-		body, err := json.MarshalIndent(f, "", "  ")
+		body, err := encodeFixture(f)
 		if err != nil {
 			t.Fatalf("encoding %s: %v", p, err)
 		}

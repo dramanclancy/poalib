@@ -12,6 +12,7 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"unicode"
 
 	"github.com/dramanclancy/poalib/domain"
 )
@@ -100,23 +101,27 @@ func (s *Scanner) extractOrderAt(fields map[string]Field, instance int, pf strin
 	reference := fieldForInstance(fields, "Reference Number", instance)
 	totalExVAT := fieldForInstance(fields, "Total Order Amount - exVAT", instance)
 	orderDetails := fieldForInstance(fields, "Order Details", instance)
+	orderDiscount := fieldForInstance(fields, "Order Discount", instance)
 
 	o := domain.POAOrder{
-		PF:                   pf,
-		TotalExVAT:           s.moneyPtr(pf, "total amount exVAT", totalExVAT.Content),
-		ProposedDeliveryDate: strings.TrimSpace(delDate.Content),
+		PF:         pf,
+		TotalExVAT: s.moneyPtr(pf, "total amount exVAT", totalExVAT.Content),
+		// Taken off the ex-VAT total; "5%" is a rate, anything else an amount.
+		OrderDiscount:          s.moneyPtr(pf, "order discount", orderDiscount.Content),
+		OrderDiscountIsPercent: strings.Contains(orderDiscount.Content, "%"),
+		ProposedDeliveryDate:   strings.TrimSpace(delDate.Content),
 		// The label is sometimes captured along with the value ("Ack No:\n2332206").
 		// Keeping only the last line gives the reference a human would quote.
 		ReferenceNumber: lastLine(reference.Content),
 		Products:        make([]domain.POAProduct, 0, len(orderDetails.ValueArray)),
 	}
 
-	for _, item := range orderDetails.ValueArray {
+	for n, item := range orderDetails.ValueArray {
 		vo := item.ValueObject
 		if vo == nil {
 			continue
 		}
-		o.Products = append(o.Products, domain.POAProduct{
+		p := domain.POAProduct{
 			Code:            vo["Product"].Content,
 			Description:     vo["Description"].Content,
 			Description2:    vo["Description 2"].Content,
@@ -125,10 +130,77 @@ func (s *Scanner) extractOrderAt(fields map[string]Field, instance int, pf strin
 			UnitPrice:       s.money(pf, "unit price", vo["Unit Product Price"].Content),
 			DiscountPercent: s.money(pf, "discount %", vo["Discount%"].Content),
 			DiscountAmount:  s.money(pf, "discount amount", vo["Discount Amount"].Content),
-			LineTotal:       s.moneyPtr(pf, "line total", vo["Total Product Qty Price"].Content),
-		})
+			// Compounds on the first discount; see POAProduct.Net.
+			FurtherDiscountPercent: s.money(pf, "further discount %", vo["Further Discount %"].Content),
+			FurtherDiscountAmount:  s.money(pf, "further discount amount", vo["Further Discount Amount"].Content),
+			LineTotal:              s.moneyPtr(pf, "line total", vo["Total Product Qty Price"].Content),
+		}
+		if blankLine(p) {
+			s.logf("extract: %s: dropped line %d, which carries no text, quantity or money", pf, n+1)
+			continue
+		}
+		p.Code, p.Description = splitSpilledCode(p.Code, p.Description)
+		o.Products = append(o.Products, p)
 	}
 	return o
+}
+
+// blankLine reports a row the model returned with nothing in it: no letter or
+// digit in any text column, and no quantity or money. Kaymed and Parker Knoll
+// layouts produce these ("-", or empty) between real lines; kept, each became
+// an unmatched acknowledgement line, and any unmatched line blocks acceptance
+// (PF131048 carried three, PF131425 eight).
+func blankLine(p domain.POAProduct) bool {
+	text := p.Code + p.Description + p.Description2 + p.Description3
+	if strings.IndexFunc(text, func(r rune) bool { return unicode.IsLetter(r) || unicode.IsDigit(r) }) >= 0 {
+		return false
+	}
+	total, _ := domain.Deref(p.LineTotal)
+	return p.Qty == 0 && p.UnitPrice == 0 && total == 0
+}
+
+// splitSpilledCode repairs a row whose whole text landed in the Product
+// column with Description empty — "CA24 Natural Indulge", "S21115.031000000.00EC00CB York".
+// Harrison Spinks, Kaymed and Parker Knoll layouts do this on most lines.
+//
+// A leading token shaped like a product code stays the code and the rest
+// becomes the description; with no such token the whole text is description.
+// The remainder must hold a real word, so a code with a suffix ("NFX2S (A)")
+// is left whole. Text() reads the same words either way, so the embedding and
+// code matching are unaffected; what changes is that the report's code and
+// description columns say what they claim to.
+func splitSpilledCode(code, desc string) (string, string) {
+	code = strings.TrimSpace(code)
+	if strings.TrimSpace(desc) != "" {
+		return code, desc
+	}
+	cut := strings.IndexFunc(code, unicode.IsSpace)
+	if cut < 0 {
+		return code, desc
+	}
+	first, rest := code[:cut], strings.TrimSpace(code[cut:])
+	if !hasWord(rest) {
+		return code, desc
+	}
+	if domain.LooksLikeProductCode(first, domain.DefaultConfig()) {
+		return first, rest
+	}
+	return "", code
+}
+
+// hasWord reports whether s holds a run of three or more letters.
+func hasWord(s string) bool {
+	run := 0
+	for _, r := range s {
+		if unicode.IsLetter(r) {
+			if run++; run >= 3 {
+				return true
+			}
+			continue
+		}
+		run = 0
+	}
+	return false
 }
 
 // lastLine returns the final non-empty line of s, trimmed. Document

@@ -181,3 +181,27 @@ func TestResolveCodeAmbiguity_OneCodeOnTwoItems(t *testing.T) {
 		}
 	}
 }
+
+// TestVendorItemNoMatch: the supplier's Product column against BC's
+// Vendor_Item_No, including the short codes codeMatch's floor ignores.
+func TestVendorItemNoMatch(t *testing.T) {
+	item := func(vin string) BCProduct { return BCProduct{Detail: &ItemDetail{VendorItemNo: vin}} }
+	tests := []struct {
+		code, vin, want string
+	}{
+		{"1170", "1170", "exact"},
+		{"(1170) MIRA SWIVEL CHAIR", "1170", "exact"},
+		{"C260-P", "C260", "prefix"},
+		{"CS/1452 P15VINTAGES0A", "CS/1452-V P15 S0A", ""},
+		{"AR10", "", ""},
+		{"013", "013", ""}, // under MinProductCodeLen: too short to mean anything
+	}
+	for _, tc := range tests {
+		if got := vendorItemNoMatch(tc.code, item(tc.vin), cfg()); got != tc.want {
+			t.Errorf("%q against %q = %q, want %q", tc.code, tc.vin, got, tc.want)
+		}
+	}
+	if got := vendorItemNoMatch("1170", BCProduct{}, cfg()); got != "" {
+		t.Errorf("no item record = %q, want blank", got)
+	}
+}

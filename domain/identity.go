@@ -33,17 +33,17 @@ func squash(s string) string {
 // range or family.
 func productCodeIn(s string, cfg Config) string {
 	for _, raw := range strings.Fields(s) {
-		if looksLikeProductCode(raw, cfg) {
+		if LooksLikeProductCode(raw, cfg) {
 			return squash(raw)
 		}
 	}
 	return ""
 }
 
-// looksLikeProductCode is the structural test itself, split out so anything
+// LooksLikeProductCode is the structural test itself, split out so anything
 // else deciding "is this token a code?" asks the same question rather than
 // growing a second answer to it.
-func looksLikeProductCode(token string, cfg Config) bool {
+func LooksLikeProductCode(token string, cfg Config) bool {
 	t := squash(token)
 	if len(t) < cfg.MinProductCodeLen || t[0] < 'A' || t[0] > 'Z' {
 		return false
@@ -82,6 +82,37 @@ func codeMatch(poaSquashed string, bc BCProduct, vendorNo string, cfg Config) (m
 	default:
 		return false, ""
 	}
+}
+
+// vendorItemNoMatch compares the supplier's Product column directly with BC's
+// Vendor_Item_No, token by token: "exact" when a token (or the whole column)
+// equals it, "prefix" when one begins with it, "" otherwise.
+//
+// codeMatch misses these. It ignores codes under MinCodeLen, so Baker's C260
+// and Ego Italiano's 1170 can never match there, and it demands containment,
+// so C260-P against C260 only works by accident of length. This is reported
+// in the workbook and nothing else: whether it is safe to let a 4-character
+// code decide identity is a question for the corpus, not a guess.
+func vendorItemNoMatch(poaCode string, bc BCProduct, cfg Config) string {
+	if bc.Detail == nil {
+		return ""
+	}
+	vin := squash(bc.Detail.VendorItemNo)
+	if len(vin) < cfg.MinProductCodeLen {
+		return ""
+	}
+	tokens := append(strings.Fields(poaCode), poaCode)
+	for _, t := range tokens {
+		if squash(t) == vin {
+			return "exact"
+		}
+	}
+	for _, t := range tokens {
+		if strings.HasPrefix(squash(t), vin) {
+			return "prefix"
+		}
+	}
+	return ""
 }
 
 // codeStatus explains what is known about BC's codes for this product,
