@@ -140,6 +140,10 @@ func (s *Scanner) extractOrderAt(fields map[string]Field, instance int, pf strin
 			continue
 		}
 		p.Code, p.Description = splitSpilledCode(p.Code, p.Description)
+		if fillMissingUnitPrice(&p) {
+			s.logf("extract: %s: line %d has no unit price; derived %.2f from its line total %.2f over qty %d",
+				pf, n+1, p.UnitPrice, *p.LineTotal, p.Qty)
+		}
 		o.Products = append(o.Products, p)
 	}
 	return o
@@ -157,6 +161,29 @@ func blankLine(p domain.POAProduct) bool {
 	}
 	total, _ := domain.Deref(p.LineTotal)
 	return p.Qty == 0 && p.UnitPrice == 0 && total == 0
+}
+
+// fillMissingUnitPrice repairs a row whose unit price came back blank or zero
+// while its quantity and printed line total did not, setting the unit price to
+// line total / qty. It reports whether it changed p.
+//
+// PF131566 (Parker Knoll SO374591): the first row after the table carried
+// onto page 2 lost its £369.00 unit price although the PDF prints it, so the
+// line counted as £0 and the seven-line group it belonged to failed on price.
+//
+// Only an undiscounted line is repaired. There the total is exactly qty × unit
+// price; with a discount the unit price cannot be recovered without trusting
+// one discount column over another, so the arithmetic check is left to flag it.
+func fillMissingUnitPrice(p *domain.POAProduct) bool {
+	total, ok := domain.Deref(p.LineTotal)
+	if p.UnitPrice != 0 || p.Qty <= 0 || !ok || total <= 0 {
+		return false
+	}
+	if p.DiscountPercent != 0 || p.DiscountAmount != 0 || p.FurtherDiscountPercent != 0 || p.FurtherDiscountAmount != 0 {
+		return false
+	}
+	p.UnitPrice = total / float64(p.Qty)
+	return true
 }
 
 // splitSpilledCode repairs a row whose whole text landed in the Product
