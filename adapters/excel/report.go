@@ -170,6 +170,15 @@ func writeSummary(f *excelize.File, st styles, res domain.Result, run app.RunRec
 	}
 	put("Supplier", res.BC.VendorName, "")
 	put("BC status", res.BC.Status, "")
+	// Four captured orders (Draft, total 0.00) came back from BC with no lines
+	// at all, and the workbook showed only a column of unmatched "products":
+	// nothing said there had been nothing to pair them with.
+	if run.BCLinesFetched == 0 {
+		emptyRow := row
+		put("BC order lines", "none — Business Central returned this order with no lines",
+			"Every acknowledged line is unmatched because the order had nothing to pair it with, not because the supplier listed goods that were not ordered. Usually the order has not been entered yet; re-run once it has.")
+		_ = f.SetCellStyle(sheetSummary, cell(2, emptyRow), cell(2, emptyRow), st.warnBox)
+	}
 	put("Acknowledgement date", res.POA.ProposedDeliveryDate, "Proposed delivery date as printed.")
 	put("Supplier reference", res.POA.ReferenceNumber, "")
 

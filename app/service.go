@@ -132,6 +132,10 @@ func (s *Service) reconcileOne(ctx context.Context, poaOrder domain.POAOrder, pa
 		s.logf("%s: no such purchase order in BC; reconciled against %s instead",
 			poaOrder.PF, rec.OrderNumberUsed)
 	}
+	if rec.BCLinesFetched == 0 {
+		s.logf("%s: Business Central returned the order (status %q) with no lines; every acknowledged line is unmatched",
+			poaOrder.PF, bcOrder.Status)
+	}
 	if rec.Degraded() {
 		s.logf("%s reconciled in a degraded state: %s", poaOrder.PF, rec.Summary())
 	}

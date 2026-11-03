@@ -177,6 +177,40 @@ func TestBuild_SummaryReportsHowTheRunWent(t *testing.T) {
 	}
 }
 
+// TestBuild_SummarySaysWhenBCHadNoLines: an order BC returned empty must say
+// so, rather than leave a reader to infer it from every POA line being
+// unmatched and a BC total of 0.00 — and an order with lines must not.
+func TestBuild_SummarySaysWhenBCHadNoLines(t *testing.T) {
+	summary := func(run app.RunRecord, res domain.Result) string {
+		t.Helper()
+		data, err := Build(res, run)
+		if err != nil {
+			t.Fatalf("Build: %v", err)
+		}
+		f := open(t, data)
+		defer f.Close()
+		rows, _ := f.GetRows(sheetSummary)
+		var b strings.Builder
+		for _, r := range rows {
+			b.WriteString(strings.Join(r, "\x1f") + "\n")
+		}
+		return b.String()
+	}
+	const note = "Business Central returned this order with no lines"
+
+	res, run := sample()
+	if strings.Contains(summary(run, res), note) {
+		t.Error("an order with lines was reported as empty")
+	}
+
+	empty := domain.BCOrder{PF: "PF131737", Status: "Draft", Enrichment: domain.EnrichmentApplied}
+	res = domain.Reconcile(res.POA, empty, domain.DefaultConfig())
+	run.BCLinesFetched, run.BCProductsBuilt = 0, 0
+	if !strings.Contains(summary(run, res), note) {
+		t.Error("the Summary does not say BC returned the order with no lines")
+	}
+}
+
 // TestBuild_SheetsAndBlanks guards the sheet set, and that an absent value
 // stays blank rather than becoming a zero a reader would believe.
 func TestBuild_SheetsAndBlanks(t *testing.T) {

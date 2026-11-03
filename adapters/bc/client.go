@@ -84,6 +84,9 @@ type PurchaseOrder struct {
 	TotalAmountExclTax float64 `json:"totalAmountExcludingTax"`
 
 	PurchaseOrderLines []PurchaseOrderLine `json:"purchaseOrderLines"`
+	// LinesNextLink is set when Business Central paged the expanded lines and
+	// PurchaseOrderLines holds only the first page. See errTruncated.
+	LinesNextLink string `json:"purchaseOrderLines@odata.nextLink"`
 }
 
 // PurchaseOrderLine mirrors the BC API v2.0 purchaseOrderLines entity (subset).
@@ -121,8 +124,16 @@ type Item struct {
 }
 
 type itemListResponse struct {
-	Value []Item `json:"value"`
+	Value    []Item `json:"value"`
+	NextLink string `json:"@odata.nextLink"`
 }
+
+// errTruncated reports a response Business Central paged: what arrived is the
+// first page only. Nothing here follows the link, because no captured order
+// or lookup has ever been paged; but reading the first page as the whole set
+// would compare against an order missing lines, or report items as having no
+// record, with nothing to say that anything was cut off.
+var errTruncated = errors.New("Business Central returned only the first page of the response (@odata.nextLink present)")
 
 // ---------------------------------------------------------------------------
 // Core request plumbing
@@ -206,6 +217,9 @@ func (c *BCClient) GetPurchaseOrder(ctx context.Context, poNumber string) (*Purc
 	if len(parsed.Value) > 1 {
 		return nil, fmt.Errorf("purchase order %q matched %d records; expected exactly 1", poNumber, len(parsed.Value))
 	}
+	if parsed.Value[0].LinesNextLink != "" {
+		return nil, fmt.Errorf("purchase order %q lines: %w", poNumber, errTruncated)
+	}
 
 	return &parsed.Value[0], nil
 }
@@ -220,6 +234,7 @@ const itemChunkSize = 20
 //
 // A failing chunk does not stop the others: whatever arrived is returned
 // alongside the first error, so one bad request costs at most its own chunk.
+// A paged response counts as failing, with its first page kept.
 func (c *BCClient) GetItems(ctx context.Context, numbers []string) (map[string]Item, error) {
 	out := make(map[string]Item, len(numbers))
 	var firstErr error
@@ -232,12 +247,10 @@ func (c *BCClient) GetItems(ctx context.Context, numbers []string) (map[string]I
 		params := url.Values{}
 		params.Set("$filter", strings.Join(clauses, " or "))
 
+		// A truncated page still carries real items alongside its error.
 		items, err := c.getItemPage(ctx, "/items?"+params.Encode())
-		if err != nil {
-			if firstErr == nil {
-				firstErr = fmt.Errorf("fetching items %d-%d: %w", start, start+len(chunk), err)
-			}
-			continue
+		if err != nil && firstErr == nil {
+			firstErr = fmt.Errorf("fetching items %d-%d: %w", start, start+len(chunk), err)
 		}
 		for _, item := range items {
 			out[strings.ToUpper(item.Number)] = item
@@ -257,6 +270,9 @@ func (c *BCClient) getItemPage(ctx context.Context, pathAndQuery string) ([]Item
 	var parsed itemListResponse
 	if err := json.Unmarshal(body, &parsed); err != nil {
 		return nil, fmt.Errorf("parsing response: %w", err)
+	}
+	if parsed.NextLink != "" {
+		return parsed.Value, errTruncated
 	}
 	return parsed.Value, nil
 }

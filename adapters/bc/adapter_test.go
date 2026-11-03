@@ -1,6 +1,10 @@
 package bc
 
 import (
+	"context"
+	"io"
+	"net/http"
+	"strings"
 	"testing"
 
 	"github.com/dramanclancy/poalib/domain"
@@ -33,6 +37,82 @@ func TestGroupLines(t *testing.T) {
 	}
 	if surcharge.LineType != "Account" || surcharge.Net != 25 || len(surcharge.Comments) != 0 {
 		t.Errorf("surcharge = %+v, want an Account product with no comments", surcharge)
+	}
+}
+
+// TestGroupLines_KeepsEveryValueLine: whatever its type, a line that is not
+// text becomes a product, so the products always carry every unit of money
+// BC's header total does. "Charge" (an item charge: freight, delivery, duty)
+// used to fall through the switch and vanish, leaving the total short by its
+// amount with no BC line to name; an unknown type would have gone the same way.
+func TestGroupLines_KeepsEveryValueLine(t *testing.T) {
+	lines := []PurchaseOrderLine{
+		{Sequence: 10000, LineType: "Item", LineObjectNumber: "IT0225813", Description: "Armchair", Quantity: 1, DirectUnitCost: 552, NetAmount: 552},
+		{Sequence: 20000, LineType: "Comment", Description: "2547 VERONA IRIS"},
+		{Sequence: 30000, LineType: "Charge", LineObjectNumber: "DELIVERY", Description: "Delivery charge", Quantity: 1, DirectUnitCost: 45, NetAmount: 45},
+		{Sequence: 40000, LineType: "Allocation Account", LineObjectNumber: "AA01", Description: "Allocated freight", Quantity: 1, DirectUnitCost: 12.5, NetAmount: 12.5},
+		// An empty type that carries nothing is text; one carrying money is not.
+		{Sequence: 50000, LineType: "", Description: "Deliver to store 12"},
+		{Sequence: 60000, LineType: "", LineObjectNumber: "X1", Description: "Untyped value line", Quantity: 1, NetAmount: 3},
+	}
+	const headerTotal = 552 + 45 + 12.5 + 3
+
+	got := groupLines(lines)
+
+	var sum float64
+	types := make([]string, len(got))
+	for i, p := range got {
+		sum += p.Net
+		types[i] = p.LineType
+	}
+	if sum != headerTotal {
+		t.Errorf("products carry %.2f, want the header's %.2f: a value line was dropped (types %q)", sum, headerTotal, types)
+	}
+	if len(got) != 4 {
+		t.Fatalf("built %d products %q, want 4: Item, Charge, Allocation Account, untyped value line", len(got), types)
+	}
+	if c := got[1]; c.LineType != "Charge" || c.ItemNo != "DELIVERY" || c.LineDescription != "Delivery charge" {
+		t.Errorf("charge product = %+v, want the item charge line with its own number and text", c)
+	}
+	if got[0].Comments == nil || got[0].Comments[0] != "2547 VERONA IRIS" {
+		t.Errorf("item comments = %q, want its comment line", got[0].Comments)
+	}
+	if allocation := got[2]; len(allocation.Comments) != 1 || allocation.Comments[0] != "Deliver to store 12" {
+		t.Errorf("an empty-type text line should qualify the line above it; comments = %q", allocation.Comments)
+	}
+}
+
+// TestSourceOrder_EmptyOrder pins what an order BC holds no lines for builds
+// to: no products, a zero line count for the run record, and no lookups. Four
+// captured Draft orders came back like this; the order is a fact to report,
+// not an error to fail on.
+func TestSourceOrder_EmptyOrder(t *testing.T) {
+	var requests []string
+	orders := &BCClient{
+		cred:    fakeCredential{},
+		baseURL: "https://example.invalid/v2.0",
+		httpClient: &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+			requests = append(requests, r.URL.Path)
+			body := `{"value":[{"id":"po-1","number":"PF131737","vendorNumber":"VX1","status":"Draft","totalAmountExcludingTax":0,"purchaseOrderLines":[]}]}`
+			return &http.Response{StatusCode: http.StatusOK, Body: io.NopCloser(strings.NewReader(body)), Header: make(http.Header)}, nil
+		})},
+	}
+	items := &CaseysClient{cred: fakeCredential{}, baseURL: "https://example.invalid/caseys",
+		httpClient: &http.Client{Transport: erroringTransport{}}}
+	src := &Source{Orders: orders, Items: items}
+
+	order, stats, err := src.Order(context.Background(), "PF131737")
+	if err != nil {
+		t.Fatalf("Order: %v", err)
+	}
+	if len(order.Products) != 0 || stats.LinesFetched != 0 || order.Status != "Draft" {
+		t.Errorf("order = %d products, %d lines fetched, status %q; want 0, 0, Draft", len(order.Products), stats.LinesFetched, order.Status)
+	}
+	if len(requests) != 1 {
+		t.Errorf("issued %d requests %q, want only the order itself: there is no item to look up", len(requests), requests)
+	}
+	if order.Enrichment != domain.EnrichmentApplied || stats.EnrichmentError != "" {
+		t.Errorf("enrichment = %s / %q, want applied with no error: nothing was asked for", order.Enrichment, stats.EnrichmentError)
 	}
 }
 

@@ -55,6 +55,53 @@ func TestDoRequest_HTTPClientErrorDoesNotPanic(t *testing.T) {
 	}
 }
 
+// staticServer answers every request with body.
+func staticServer(body string) *http.Client {
+	return &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		return &http.Response{StatusCode: http.StatusOK, Body: io.NopCloser(strings.NewReader(body)), Header: make(http.Header)}, nil
+	})}
+}
+
+// TestGetPurchaseOrder_PagedLinesAreAnError: a page of an order's lines is
+// not the order. Reconciled as though it were, every line on a later page
+// would read as unacknowledged and every POA line for it as unmatched.
+func TestGetPurchaseOrder_PagedLinesAreAnError(t *testing.T) {
+	c := &BCClient{cred: fakeCredential{}, baseURL: "https://example.invalid/v2.0", httpClient: staticServer(
+		`{"value":[{"number":"PF1","purchaseOrderLines":[{"sequence":10000,"lineType":"Item","lineObjectNumber":"IT1","netAmount":10}],` +
+			`"purchaseOrderLines@odata.nextLink":"https://example.invalid/v2.0/purchaseOrders(1)/purchaseOrderLines?$skiptoken=1"}]}`)}
+
+	_, err := c.GetPurchaseOrder(context.Background(), "PF1")
+	if !errors.Is(err, errTruncated) {
+		t.Fatalf("err = %v, want errTruncated", err)
+	}
+	if errors.Is(err, ErrPurchaseOrderNotFound) {
+		t.Error("a paged order must not read as 'not found': fetchOrder would retry another number")
+	}
+
+	// The same order without the link is complete and comes back as is.
+	c.httpClient = staticServer(`{"value":[{"number":"PF1","purchaseOrderLines":[{"sequence":10000,"lineType":"Item","lineObjectNumber":"IT1","netAmount":10}]}]}`)
+	po, err := c.GetPurchaseOrder(context.Background(), "PF1")
+	if err != nil || len(po.PurchaseOrderLines) != 1 {
+		t.Fatalf("complete order: %v, %+v", err, po)
+	}
+}
+
+// TestGetItems_PagedResponseKeepsWhatArrived: the first page's items are real
+// and are kept, but the lookup reports the truncation rather than letting the
+// missing ones read as "BC holds no such item".
+func TestGetItems_PagedResponseKeepsWhatArrived(t *testing.T) {
+	c := &BCClient{cred: fakeCredential{}, baseURL: "https://example.invalid/v2.0", httpClient: staticServer(
+		`{"value":[{"number":"IT1","displayName":"Armchair"}],"@odata.nextLink":"https://example.invalid/next"}`)}
+
+	items, err := c.GetItems(context.Background(), []string{"IT1", "IT2"})
+	if !errors.Is(err, errTruncated) {
+		t.Errorf("err = %v, want errTruncated", err)
+	}
+	if items["IT1"].DisplayName != "Armchair" {
+		t.Errorf("items = %+v, want the first page's item kept", items)
+	}
+}
+
 // itemServer answers /items?$filter=number eq 'A' or ... with one item per
 // clause, named after its number, and fails any request whose filter mentions
 // a number in failFor.

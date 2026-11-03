@@ -184,10 +184,15 @@ func toItemDetail(item CaseysItem) domain.ItemDetail {
 // groupLines walks lines in sequence order, starting a new product on each
 // value-bearing line and attaching the following Comment lines to it.
 //
-// Account lines start a product too. When only "Item" did, a surcharge line
-// (G/L 718000, "Vendor Surcharges") never became a product: it could not be
-// matched, and the matched total was short by exactly that amount on every
-// Ashwood order.
+// Every line that is not text starts a product, whatever its type. When only
+// "Item" did, a surcharge line (G/L 718000, "Vendor Surcharges") never became
+// a product: it could not be matched, and the matched total was short by
+// exactly that amount on every Ashwood order. The fix then listed the types
+// it knew — Item, Account, Fixed Asset, Resource — which repeated the same
+// mistake for "Charge", the API's name for an item charge (freight, delivery,
+// duty): that line fell through the switch and vanished from the order while
+// its money stayed in BC's header total. An allowlist of value-bearing types
+// drops whatever BC adds next; a line is a qualifier only when it is text.
 func groupLines(lines []PurchaseOrderLine) []domain.BCProduct {
 	sorted := make([]PurchaseOrderLine, len(lines))
 	copy(sorted, lines)
@@ -195,8 +200,8 @@ func groupLines(lines []PurchaseOrderLine) []domain.BCProduct {
 
 	var products []domain.BCProduct
 	for _, l := range sorted {
-		switch l.LineType {
-		case "Item", "Account", "G/L Account", "Fixed Asset", "Resource":
+		switch {
+		case !isTextLine(l):
 			products = append(products, domain.BCProduct{
 				LineID:          l.ID,
 				ItemNo:          l.LineObjectNumber,
@@ -211,16 +216,27 @@ func groupLines(lines []PurchaseOrderLine) []domain.BCProduct {
 				DiscountAmount:  l.DiscountAmount,
 				Net:             l.NetAmount,
 			})
-		case "Comment":
-			if len(products) > 0 {
-				last := &products[len(products)-1]
-				last.Comments = append(last.Comments, l.Description)
-			}
-			// A Comment before any value line has no owner; dropping it is
-			// correct — it is a document header, not a line qualifier.
+		case len(products) > 0:
+			last := &products[len(products)-1]
+			last.Comments = append(last.Comments, l.Description)
 		}
+		// A text line before any value line has no owner; dropping it is
+		// correct — it is a document header, not a line qualifier.
 	}
 	return products
+}
+
+// isTextLine reports whether l only qualifies the line above it. The API
+// reports BC's blank-type text line as "Comment"; a line with no type at all
+// is treated the same only while it carries nothing a product could — no
+// number, quantity or money — so an unexpected empty type can never hide a
+// value line the way an unlisted one used to.
+func isTextLine(l PurchaseOrderLine) bool {
+	if l.LineType == "Comment" {
+		return true
+	}
+	return strings.TrimSpace(l.LineType) == "" && l.LineObjectNumber == "" &&
+		l.Quantity == 0 && l.DirectUnitCost == 0 && l.NetAmount == 0
 }
 
 // mergedDescription builds the text the comparison actually reads: the item's

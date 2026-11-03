@@ -163,6 +163,78 @@ func TestCorpus_SplitAndAggregatedLines(t *testing.T) {
 	}
 }
 
+// TestCorpus_PF131896 pins the two captures of PF131896 (ADM Home /
+// Marinelli). Both were taken while BC still held the FABRIC Group 1 items
+// the supplier did not acknowledge (it confirmed leather VERONA grade 20), so
+// both must be stopped — and for the reasons that were really true, not by a
+// missing BC line: all nine BC lines became three products whose nets add up
+// to the order total, and every acknowledged line was paired. The second
+// capture's 3 Seater can only pair with BC's 2 Seater Maxi; a similar
+// description must not let that through, and the seat count is what says so.
+//
+// BC was corrected after both captures (lines replaced 2026-11-02 14:45 UTC),
+// so neither fixture describes the order as it stands; a fresh run is needed
+// for that. Skips when the fixtures are not on disk.
+func TestCorpus_PF131896(t *testing.T) {
+	cases := []struct {
+		file      string
+		price     []domain.CheckStatus
+		seats     []domain.CheckStatus
+		qtyFailed int
+		total     float64
+	}{
+		{"PF131896_20261102T092916Z.json",
+			[]domain.CheckStatus{domain.StatusMismatch, domain.StatusMismatch, domain.StatusMismatch},
+			[]domain.CheckStatus{domain.StatusMatch, domain.StatusUnknown, domain.StatusUnknown}, 1, -255},
+		{"PF131896_20261102T113929Z.json",
+			[]domain.CheckStatus{domain.StatusMismatch, domain.StatusMismatch, domain.StatusMismatch},
+			[]domain.CheckStatus{domain.StatusUnknown, domain.StatusUnknown, domain.StatusMismatch}, 1, -72},
+	}
+	for _, c := range cases {
+		t.Run(c.file, func(t *testing.T) {
+			path := filepath.Join(corpusDir(), c.file)
+			if _, err := os.Stat(path); err != nil {
+				t.Skipf("no fixture %s", c.file)
+			}
+			f, err := LoadFixture(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var sum float64
+			for _, b := range f.BC.Products {
+				sum += b.Net
+			}
+			if f.Run.BCLinesFetched != 9 || len(f.BC.Products) != 3 || sum != f.BC.TotalExVAT {
+				t.Fatalf("BC side: %d lines -> %d products carrying %.2f of %.2f; want 9 -> 3 carrying all of it",
+					f.Run.BCLinesFetched, len(f.BC.Products), sum, f.BC.TotalExVAT)
+			}
+
+			got := domain.Reconcile(f.POA, f.BC, f.Config)
+			if got.WriteOK {
+				t.Fatal("accepted an order whose every line differs from BC on price")
+			}
+			if len(got.Products) != 3 || len(got.UnmatchedPOA) != 0 || len(got.UnmatchedBC) != 0 {
+				t.Fatalf("%d pairs, %d unmatched POA, %d unmatched BC; want 3, 0, 0",
+					len(got.Products), len(got.UnmatchedPOA), len(got.UnmatchedBC))
+			}
+			qtyFailed := 0
+			for i, p := range got.Products {
+				if p.Price.Status != c.price[i] || p.Seats.Status != c.seats[i] {
+					t.Errorf("POA line %d (%s) vs %s: price %s, seats %s; want %s, %s",
+						p.POAIndex, p.POA.Code, p.BC.ItemNo, p.Price.Status, p.Seats.Status, c.price[i], c.seats[i])
+				}
+				if p.Quantity.Failed() {
+					qtyFailed++
+				}
+			}
+			if qtyFailed != c.qtyFailed || got.Totals.Difference != c.total {
+				t.Errorf("%d quantity flags, total difference %.2f; want %d, %.2f",
+					qtyFailed, got.Totals.Difference, c.qtyFailed, c.total)
+			}
+		})
+	}
+}
+
 func groupLabel(g *domain.LineGroup) string {
 	if g == nil {
 		return ""
