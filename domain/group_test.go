@@ -292,6 +292,44 @@ func TestReconcile_CodedLineIsNeverTreatedAsACharge(t *testing.T) {
 	}
 }
 
+// TestReconcile_LineWorthMoreThanTheIdentifiedOneIsNotACharge is PF129209: a
+// chair at 1077 and its height ring at 79 against BC's one line for both. The
+// ring's words identify it and the chair's fall short, and the chair prints no
+// structural code, so it met every other condition for a charge. The chair is
+// the product: a line cannot be a charge on something worth less than itself.
+func TestReconcile_LineWorthMoreThanTheIdentifiedOneIsNotACharge(t *testing.T) {
+	poa, bc := order(
+		POAOrder{PF: "PF-CHAIR", Products: []POAProduct{
+			{Code: "8948 28 S44", Description: "MOSEL MAXI MANUAL SEAT GAS SPRUNG BACK", Qty: 5, UnitPrice: 1077},
+			{Code: "8948 98 AXX", Description: "EXTRA HEIGHT RING FOR MOSEL MAXI", Qty: 5, UnitPrice: 79},
+		}},
+		BCOrder{VendorNo: "VX1", Enrichment: EnrichmentApplied, Products: []BCProduct{
+			bcProduct("bc-1", "IT1", "Extra Height Ring for Mosel Maxi Chair 8948", 5, 1156, 5780),
+		}},
+	)
+
+	r := Reconcile(poa, bc, cfg())
+
+	groupOf(t, r, 0, 1)
+	if len(r.Products) != 2 {
+		t.Fatalf("%d rows, want the chair and the ring grouped against BC's line:%s", len(r.Products), describeRows(r))
+	}
+	if r.Products[1].Description.Failed() {
+		t.Fatalf("the ring should be identified, or this does not test the fold:%s", describeRows(r))
+	}
+	if d := r.Products[0].Description; d.FoldedCharge || !d.Failed() {
+		t.Errorf("chair row: folded=%v status=%q, want the weak description still flagged", d.FoldedCharge, d.Status)
+	}
+	if r.WriteOK {
+		t.Errorf("WriteOK=true: a product with an unidentified description must still be reviewed:%s", describeRows(r))
+	}
+	for _, p := range r.Products {
+		if p.Price.Failed() || p.Quantity.Failed() {
+			t.Errorf("POA line %d: the combined money and quantity agree and must not be flagged", p.POAIndex)
+		}
+	}
+}
+
 // TestReconcile_DuplicateAcknowledgementStaysUnmatched: qty 1 printed twice
 // against BC's qty 1 is a duplicate, not a split — neither the quantities nor
 // the unit prices add up — and the pair that agrees is never broken up to

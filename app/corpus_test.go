@@ -137,6 +137,8 @@ func TestCorpus_SplitAndAggregatedLines(t *testing.T) {
 		{"PF131012", false, 1, 0, "two divan halves are one base; descriptions too weak to approve"},
 		{"PF130543", false, 1, 0, "one acknowledged qty 2 is BC's same item on two lines"},
 		{"PF130884", false, 0, 1, "chaise + sofa unit, but the money differs: no structure is corroborated"},
+		{"PF131672", true, 1, 0, "duty the supplier itemises, carried inside BC's rug price: a charge, so it does not block"},
+		{"PF129209", false, 1, 0, "a chair and its height ring are BC's one line; the chair is a product with a weak description, not a charge on its ring"},
 	}
 	for _, c := range cases {
 		t.Run(c.pf, func(t *testing.T) {
