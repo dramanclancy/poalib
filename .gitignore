@@ -54,3 +54,5 @@ azure-func.zip
 # Captured fixtures hold real supplier orders (names, prices, BC IDs).
 # Keep them local; the README explains how to fill the corpus.
 testdata/orders/*.json
+# The labelling workbook TestCorpus_ExportGoldSet writes holds the same data.
+testdata/goldset/
