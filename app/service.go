@@ -22,7 +22,9 @@ type Service struct {
 	Fixtures *FixtureWriter
 
 	Config domain.Config
-	Log    func(format string, args ...any)
+	// Log takes the request's context: the Functions host only shows a line
+	// that carries the invocation it was written under.
+	Log func(ctx context.Context, format string, args ...any)
 }
 
 // Outcome is one reconciled purchase order: either a completed result and the
@@ -37,9 +39,9 @@ type Outcome struct {
 	Err    error
 }
 
-func (s *Service) logf(format string, args ...any) {
+func (s *Service) logf(ctx context.Context, format string, args ...any) {
 	if s.Log != nil {
-		s.Log(format, args...)
+		s.Log(ctx, format, args...)
 		return
 	}
 	log.Printf(format, args...)
@@ -144,7 +146,7 @@ func (s *Service) reconcileOne(ctx context.Context, poaOrder domain.POAOrder, pa
 	// acknowledgement's for the same PF.
 	if !carriesLineFigures(poaOrder) {
 		err := noLineFigures(poaOrder)
-		s.logf("%s: %s", poaOrder.PF, err)
+		s.logf(ctx, "%s: %s", poaOrder.PF, err)
 		return Outcome{PF: poaOrder.PF, Run: rec, Err: err}
 	}
 
@@ -175,26 +177,26 @@ func (s *Service) reconcileOne(ctx context.Context, poaOrder domain.POAOrder, pa
 	rec.LinesFlagged = len(result.Flagged())
 
 	if rec.OrderNumberUsed != "" {
-		s.logf("%s: no such purchase order in BC; reconciled against %s instead",
+		s.logf(ctx, "%s: no such purchase order in BC; reconciled against %s instead",
 			poaOrder.PF, rec.OrderNumberUsed)
 	}
 	if rec.BCLinesFetched == 0 {
-		s.logf("%s: Business Central returned the order (status %q) with no lines; every acknowledged line is unmatched",
+		s.logf(ctx, "%s: Business Central returned the order (status %q) with no lines; every acknowledged line is unmatched",
 			poaOrder.PF, bcOrder.Status)
 	}
 	if rec.Degraded() {
-		s.logf("%s reconciled in a degraded state: %s", poaOrder.PF, rec.Summary())
+		s.logf(ctx, "%s reconciled in a degraded state: %s", poaOrder.PF, rec.Summary())
 	}
 
 	// Capture after the comparison, so the fixture carries the result to
 	// replay against.
 	if s.Fixtures.Enabled() {
-		path, err := s.Fixtures.Write(rec, poaOrder, bcOrder, result)
+		path, err := s.Fixtures.Write(ctx, rec, poaOrder, bcOrder, result)
 		if err != nil {
 			// Capture is a development aid. Losing it must never fail an
 			// order that reconciled correctly.
 			rec.FixtureError = err.Error()
-			s.logf("capturing fixture for %s: %s", poaOrder.PF, err)
+			s.logf(ctx, "capturing fixture for %s: %s", poaOrder.PF, err)
 		} else {
 			rec.FixturePath = path
 		}

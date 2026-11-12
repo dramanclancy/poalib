@@ -73,7 +73,7 @@ func newService(scans []domain.POAOrder, orders fakeOrders, emb *oneHotEmbedder)
 		Orders:   orders,
 		Embedder: emb,
 		Config:   domain.DefaultConfig(),
-		Log:      func(string, ...any) {},
+		Log:      func(context.Context, string, ...any) {},
 	}
 }
 

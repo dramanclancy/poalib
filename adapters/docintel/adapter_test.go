@@ -1,6 +1,7 @@
 package docintel
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -38,7 +39,7 @@ func TestExtractOrders_SeveralPurchaseOrdersInOneFile(t *testing.T) {
 		"Order Details - Page 3":      {ValueArray: []Field{row("ghost", "1", "1", "1")}},
 	}}
 
-	got := (&Scanner{Log: func(string, ...any) {}}).extractOrders([]Document{doc})
+	got := (&Scanner{Log: func(context.Context, string, ...any) {}}).extractOrders(context.Background(), []Document{doc})
 
 	if len(got) != 2 {
 		t.Fatalf("extracted %d orders, want 2 (slot 3 has no order number)", len(got))
@@ -87,7 +88,7 @@ func TestExtractOrders_OrderDiscount(t *testing.T) {
 				"Product": {Content: "LAW45"}, "Qty": {Content: "1.00"}, "Unit Product Price": {Content: "199.0000"},
 			}}}},
 		}}
-		got := (&Scanner{Log: func(string, ...any) {}}).extractOrders([]Document{doc})
+		got := (&Scanner{Log: func(context.Context, string, ...any) {}}).extractOrders(context.Background(), []Document{doc})
 		if len(got) != 1 {
 			t.Fatalf("%q: extracted %d orders", tc.content, len(got))
 		}
@@ -115,7 +116,7 @@ func TestExtractOrders_FurtherDiscount(t *testing.T) {
 			"Further Discount Amount": {Content: ""},
 		}}}},
 	}}
-	got := (&Scanner{Log: func(string, ...any) {}}).extractOrders([]Document{doc})
+	got := (&Scanner{Log: func(context.Context, string, ...any) {}}).extractOrders(context.Background(), []Document{doc})
 	if len(got) != 1 || len(got[0].Products) != 1 {
 		t.Fatalf("extracted %+v", got)
 	}
@@ -192,7 +193,7 @@ func TestExtractOrders_DropsBlankRowsAndSplitsSpilledCodes(t *testing.T) {
 		}},
 	}}
 
-	got := (&Scanner{Log: func(string, ...any) {}}).extractOrders([]Document{doc})[0].Products
+	got := (&Scanner{Log: func(context.Context, string, ...any) {}}).extractOrders(context.Background(), []Document{doc})[0].Products
 
 	want := []struct{ code, desc string }{
 		{"CA24", "Natural Indulge"},
@@ -236,9 +237,11 @@ func TestExtractOrders_FillsMissingUnitPrice(t *testing.T) {
 		}},
 	}}
 	var logged []string
-	s := &Scanner{Log: func(format string, args ...any) { logged = append(logged, fmt.Sprintf(format, args...)) }}
+	s := &Scanner{Log: func(_ context.Context, format string, args ...any) {
+		logged = append(logged, fmt.Sprintf(format, args...))
+	}}
 
-	got := s.extractOrders([]Document{doc})[0].Products
+	got := s.extractOrders(context.Background(), []Document{doc})[0].Products
 
 	want := []float64{369, 150, 0, 0, 0, 120}
 	if len(got) != len(want) {

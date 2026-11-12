@@ -25,7 +25,7 @@ import (
 type Source struct {
 	Orders *BCClient
 	Items  *CaseysClient
-	Log    func(format string, args ...any)
+	Log    func(ctx context.Context, format string, args ...any)
 }
 
 // Order fetches purchase order pf and builds the BC side of the comparison.
@@ -42,7 +42,7 @@ func (s *Source) Order(ctx context.Context, pf string) (domain.BCOrder, app.Orde
 	if names.Err != nil {
 		stats.ItemNamesError = names.Err.Error()
 		if s.Log != nil {
-			s.Log("item name lookup failed for %s, those lines compare on their own text: %s", pf, names.Err)
+			s.Log(ctx, "item name lookup failed for %s, those lines compare on their own text: %s", pf, names.Err)
 		}
 	}
 
@@ -100,7 +100,7 @@ func (s *Source) fetchOrder(ctx context.Context, pf string, stats *app.OrderStat
 		}
 		stats.OrderNumberUsed = base
 		if s.Log != nil {
-			s.Log("purchase order %q not found in BC; matched %q instead", pf, base)
+			s.Log(ctx, "purchase order %q not found in BC; matched %q instead", pf, base)
 		}
 		return fallback, nil
 	}
@@ -172,7 +172,7 @@ func (s *Source) enrich(ctx context.Context, pf string, order *domain.BCOrder, s
 		order.EnrichmentNote = err.Error()
 		stats.EnrichmentError = err.Error()
 		if s.Log != nil {
-			s.Log("CaseysItems enrichment failed for %s, continuing without it: %s", pf, err)
+			s.Log(ctx, "CaseysItems enrichment failed for %s, continuing without it: %s", pf, err)
 		}
 		// Partial batches still come back alongside the error, so carry on
 		// and attach whatever arrived.

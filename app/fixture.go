@@ -1,6 +1,7 @@
 package app
 
 import (
+	"context"
 	"crypto/sha256"
 	"encoding/json"
 	"fmt"
@@ -141,13 +142,13 @@ func contentHash(f Fixture) ([32]byte, error) {
 type FixtureWriter struct {
 	Dir string
 	// Log receives one line per fixture written or skipped. nil is fine.
-	Log func(format string, args ...any)
+	Log func(ctx context.Context, format string, args ...any)
 }
 
 // NewFixtureWriter returns a writer for dir, or nil when capture is disabled.
 // The nil return is the point: callers hold a *FixtureWriter and every method
 // is nil-safe, so there is no flag to check at each call site.
-func NewFixtureWriter(enabled bool, dir string, log func(string, ...any)) *FixtureWriter {
+func NewFixtureWriter(enabled bool, dir string, log func(context.Context, string, ...any)) *FixtureWriter {
 	if !enabled {
 		return nil
 	}
@@ -174,7 +175,7 @@ func (w *FixtureWriter) Enabled() bool { return w != nil }
 // put it in the corpus three times, weighting it triple in every threshold
 // sweep. Only the latest is compared, so an order that changes and changes
 // back is captured each time.
-func (w *FixtureWriter) Write(rec RunRecord, poa domain.POAOrder, bc domain.BCOrder, res domain.Result) (string, error) {
+func (w *FixtureWriter) Write(ctx context.Context, rec RunRecord, poa domain.POAOrder, bc domain.BCOrder, res domain.Result) (string, error) {
 	if !w.Enabled() {
 		return "", nil
 	}
@@ -198,7 +199,7 @@ func (w *FixtureWriter) Write(rec RunRecord, poa domain.POAOrder, bc domain.BCOr
 	}
 	if prev := w.unchangedSince(body); prev != "" {
 		if w.Log != nil {
-			w.Log("fixture for %s not written: content unchanged since %s", res.POA.PF, prev)
+			w.Log(ctx, "fixture for %s not written: content unchanged since %s", res.POA.PF, prev)
 		}
 		return prev, nil
 	}
@@ -208,7 +209,7 @@ func (w *FixtureWriter) Write(rec RunRecord, poa domain.POAOrder, bc domain.BCOr
 		return "", fmt.Errorf("writing fixture %s: %w", path, err)
 	}
 	if w.Log != nil {
-		w.Log("fixture captured for %s: %s (%d bytes)", res.POA.PF, path, len(body))
+		w.Log(ctx, "fixture captured for %s: %s (%d bytes)", res.POA.PF, path, len(body))
 	}
 	return path, nil
 }
