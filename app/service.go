@@ -2,6 +2,7 @@ package app
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log"
 	"strings"
@@ -87,6 +88,42 @@ func normalisePF(pf string) string {
 	return "PF" + pf
 }
 
+// ErrNoLineFigures reports an acknowledgement whose lines were all read with no
+// quantity, price or printed line total, so there is nothing to reconcile.
+//
+// Kristensen & Kristensen send a customs document — HS tariff codes, country
+// of origin, no prices — alongside each order confirmation, and it carries the
+// PF too. Reconciled as an acknowledgement, PF131891's arrived twelve seconds
+// after the confirmation had been accepted and reported the same order as
+// short by 1388.90; PF132080's paired the care oil with the dining table and
+// called the table itself a harmless note. Whitemeadow and De Poortere
+// documents have done the same when the model read the PF and total but not
+// the table. Every line then fails on quantity and price, which names a
+// symptom; the fault is the document or the model, and that is what to say.
+var ErrNoLineFigures = errors.New("no acknowledgement line was read with a quantity, price or line total")
+
+// carriesLineFigures reports whether any line of o has a quantity, unit price
+// or printed line total: the least a line needs before it can be compared.
+func carriesLineFigures(o domain.POAOrder) bool {
+	for _, p := range o.Products {
+		if total, _ := domain.Deref(p.LineTotal); p.Qty != 0 || p.UnitPrice != 0 || total != 0 {
+			return true
+		}
+	}
+	return false
+}
+
+// noLineFigures is the error for an order carriesLineFigures rejects, keeping
+// the one figure the document may still have yielded.
+func noLineFigures(o domain.POAOrder) error {
+	stated := ""
+	if t, ok := domain.Deref(o.TotalExVAT); ok {
+		stated = fmt.Sprintf(", order total %.2f stated", t)
+	}
+	return fmt.Errorf("%w (%d line(s) read%s), so nothing was reconciled. Either the document is not an acknowledgement (an invoice, packing list or customs document sent with one), or the model did not read its table",
+		ErrNoLineFigures, len(o.Products), stated)
+}
+
 func (s *Service) reconcileOne(ctx context.Context, poaOrder domain.POAOrder, pages int) Outcome {
 	rec := RunRecord{
 		PF:                poaOrder.PF,
@@ -100,6 +137,15 @@ func (s *Service) reconcileOne(ctx context.Context, poaOrder domain.POAOrder, pa
 	}
 	if s.Embedder != nil {
 		rec.EmbeddingModel = s.Embedder.Describe()
+	}
+
+	// Before Business Central is asked anything: a workbook of quantity and
+	// price failures here would contradict, and may replace, the real
+	// acknowledgement's for the same PF.
+	if !carriesLineFigures(poaOrder) {
+		err := noLineFigures(poaOrder)
+		s.logf("%s: %s", poaOrder.PF, err)
+		return Outcome{PF: poaOrder.PF, Run: rec, Err: err}
 	}
 
 	bcOrder, stats, err := s.Orders.Order(ctx, poaOrder.PF)

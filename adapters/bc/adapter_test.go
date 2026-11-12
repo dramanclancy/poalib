@@ -2,8 +2,10 @@ package bc
 
 import (
 	"context"
+	"errors"
 	"io"
 	"net/http"
+	"slices"
 	"strings"
 	"testing"
 
@@ -176,6 +178,65 @@ func TestToItemDetail_ZeroSeatsMeansNotRecorded(t *testing.T) {
 // Business Central has said the printed number does not exist, so this needs
 // only to identify what to try next — and to decline when there is nothing
 // sensible to try.
+// TestFallbackOrderNumbers: what is tried, and in what order, after BC has
+// said the printed number does not exist.
+func TestFallbackOrderNumbers(t *testing.T) {
+	tests := []struct {
+		in   string
+		want []string
+	}{
+		{"PF^PF130191-CC34", []string{"PF130191"}}, // the order that failed as not found
+		{"PF126282/EXC", []string{"PF126282"}},     // both rules agree: tried once
+		{"PF^PF130191/CC34", []string{"PF^PF130191", "PF130191"}},
+		{"SF130191-A", []string{"SF130191"}},
+		{"PF130368", nil},    // the printed number itself is never retried
+		{"PF1301-CC34", nil}, // too short to be an order number
+		{"PFABC", nil},
+	}
+	for _, tc := range tests {
+		if got := fallbackOrderNumbers(tc.in); !slices.Equal(got, tc.want) {
+			t.Errorf("fallbackOrderNumbers(%q) = %q, want %q", tc.in, got, tc.want)
+		}
+	}
+}
+
+// TestSourceOrder_FallsBackToEmbeddedNumber replays PF^PF130191-CC34: BC
+// holds PF130191, and the result must say that is what was reconciled.
+func TestSourceOrder_FallsBackToEmbeddedNumber(t *testing.T) {
+	var asked []string
+	orders := &BCClient{
+		cred:    fakeCredential{},
+		baseURL: "https://example.invalid/v2.0",
+		httpClient: &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+			filter := r.URL.Query().Get("$filter")
+			asked = append(asked, filter)
+			body := `{"value":[]}`
+			if filter == "number eq 'PF130191'" {
+				body = `{"value":[{"id":"po-1","number":"PF130191","status":"Open","purchaseOrderLines":[]}]}`
+			}
+			return &http.Response{StatusCode: http.StatusOK, Body: io.NopCloser(strings.NewReader(body)), Header: make(http.Header)}, nil
+		})},
+	}
+	src := &Source{Orders: orders}
+
+	order, stats, err := src.Order(context.Background(), "PF^PF130191-CC34")
+	if err != nil {
+		t.Fatalf("Order: %v", err)
+	}
+	if order.PF != "PF130191" || stats.OrderNumberUsed != "PF130191" {
+		t.Errorf("order %q, OrderNumberUsed %q; want PF130191 for both", order.PF, stats.OrderNumberUsed)
+	}
+	if len(asked) != 2 || asked[0] != "number eq 'PF^PF130191-CC34'" {
+		t.Errorf("asked %q; want the printed number first, then PF130191", asked)
+	}
+
+	// No order under either number: the error names the printed one.
+	_, _, err = src.Order(context.Background(), "PF^PF999999-CC34")
+	if !errors.Is(err, ErrPurchaseOrderNotFound) || !strings.Contains(err.Error(), "PF^PF999999-CC34") {
+		t.Errorf("err = %v; want not found, naming the printed number", err)
+	}
+}
+
 func TestBaseOrderNumber(t *testing.T) {
 	tests := []struct{ in, want string }{
 		{"PF126282/EXC", "PF126282"},

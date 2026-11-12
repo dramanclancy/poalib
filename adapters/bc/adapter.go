@@ -8,6 +8,7 @@ package bc
 import (
 	"context"
 	"errors"
+	"regexp"
 	"sort"
 	"strings"
 
@@ -64,8 +65,8 @@ func (s *Source) Order(ctx context.Context, pf string) (domain.BCOrder, app.Orde
 }
 
 // fetchOrder looks the purchase order up by the number printed on the
-// acknowledgement, falling back to the part before a "/" when Business
-// Central holds no such order.
+// acknowledgement, falling back to the part before a "/", then to the order
+// number embedded in it, when Business Central holds no such order.
 //
 // Suppliers annotate the number they print: an acknowledgement reading
 // "PF126282/EXC" answers purchase order PF126282, and BC has never heard of
@@ -83,22 +84,56 @@ func (s *Source) fetchOrder(ctx context.Context, pf string, stats *app.OrderStat
 	if err == nil {
 		return po, nil
 	}
-	base := baseOrderNumber(pf)
-	if base == "" || !errors.Is(err, ErrPurchaseOrderNotFound) {
+	if !errors.Is(err, ErrPurchaseOrderNotFound) {
 		return nil, err
 	}
 
-	fallback, ferr := s.Orders.GetPurchaseOrder(ctx, base)
-	if ferr != nil {
-		// Report the original number's failure: that is the one printed on
-		// the document, and the one a reader will be looking for.
-		return nil, err
+	for _, base := range fallbackOrderNumbers(pf) {
+		fallback, ferr := s.Orders.GetPurchaseOrder(ctx, base)
+		if errors.Is(ferr, ErrPurchaseOrderNotFound) {
+			continue
+		}
+		if ferr != nil {
+			// Report the original number's failure: that is the one printed
+			// on the document, and the one a reader will be looking for.
+			return nil, err
+		}
+		stats.OrderNumberUsed = base
+		if s.Log != nil {
+			s.Log("purchase order %q not found in BC; matched %q instead", pf, base)
+		}
+		return fallback, nil
 	}
-	stats.OrderNumberUsed = base
-	if s.Log != nil {
-		s.Log("purchase order %q not found in BC; matched %q instead", pf, base)
+	return nil, err
+}
+
+// fallbackOrderNumbers lists what to try, in order, once Business Central has
+// said the printed number does not exist: the part before a "/", then the
+// order number embedded in the text. Neither repeats the printed number or
+// the other.
+func fallbackOrderNumbers(pf string) []string {
+	var out []string
+	for _, c := range []string{baseOrderNumber(pf), embeddedOrderNumber(pf)} {
+		if c != "" && c != pf && (len(out) == 0 || out[0] != c) {
+			out = append(out, c)
+		}
 	}
-	return fallback, nil
+	return out
+}
+
+// orderNumberRe is an order number as BC files it: PF or SF and at least six
+// digits. All 520 captured orders are PF and exactly six; a shorter run is
+// more likely a fragment of something else than an order to reconcile against.
+var orderNumberRe = regexp.MustCompile(`(?:PF|SF)\d{6,}`)
+
+// embeddedOrderNumber returns the first order number inside pf, or "" when
+// there is none.
+//
+// The "/" rule alone could not read "PF^PF130191-CC34": the supplier wrapped
+// PF130191 in a prefix and a hyphenated suffix, and the acknowledgement
+// failed as "purchase order not found" for an order BC holds.
+func embeddedOrderNumber(pf string) string {
+	return orderNumberRe.FindString(pf)
 }
 
 // baseOrderNumber returns the part of an order number before the first "/",

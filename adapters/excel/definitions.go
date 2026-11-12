@@ -74,7 +74,7 @@ func otherDefinitions(cfg domain.Config) []definition {
 			Sheet: sheetSummary, Column: "Reconciled against",
 			Meaning:  "A different purchase order number from the one printed on the acknowledgement.",
 			Source:   "The run record, set when the printed number found nothing in Business Central.",
-			Calc:     "The exact printed number is always tried first. Only when Business Central answers that no such order exists is the part before the first \"/\" tried, because suppliers annotate the number they print (\"PF126282/EXC\" answers PF126282).",
+			Calc:     "The exact printed number is always tried first. Only when Business Central answers that no such order exists is the part before the first \"/\" tried, and then the order number found inside the printed text, because suppliers annotate the number they print (\"PF126282/EXC\" answers PF126282; \"PF^PF130191-CC34\" answers PF130191).",
 			Decision: "Appears only when the fallback was used. Everything in the workbook describes the order named here, not the printed one, so confirm it is the right order before acting on the verdict.",
 		},
 		{

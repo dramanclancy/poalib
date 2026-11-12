@@ -82,6 +82,14 @@ type PriceCheckResult struct {
 //
 // Money is a control: a price difference always needs a human, so this check
 // has no unknown — both sides always state a figure.
+//
+// When the difference exists only in the net computed from the extracted
+// columns — the line total the supplier prints agrees with BC, and disagrees
+// with those columns — the check still fails, but says so. PF132019
+// (Calligaris) printed 2335.96 against BC's 2335.96 and was reported as
+// "+3887.04": the model had read the 6223.00 list price and not the discount.
+// That is a misread document, and the person reviewing it should be sent to
+// the document rather than into a price dispute with the supplier.
 func priceCheck(poa POAProduct, bc BCProduct, cfg Config) PriceCheckResult {
 	diff := poa.Net() - bc.Net
 	r := PriceCheckResult{
@@ -96,7 +104,18 @@ func priceCheck(poa POAProduct, bc BCProduct, cfg Config) PriceCheckResult {
 		return r
 	}
 	r.Status = StatusMismatch
-	r.Message = fmt.Sprintf("net line value differs from BC by %+.2f (POA %.2f, BC %.2f)", diff, poa.Net(), bc.Net)
+	printed, ok := Deref(poa.LineTotal)
+	if !ok || math.Abs(printed-bc.Net) >= cfg.MoneyTolerance || math.Abs(printed-poa.Net()) < cfg.MoneyTolerance {
+		r.Message = fmt.Sprintf("net line value differs from BC by %+.2f (POA %.2f, BC %.2f)", diff, poa.Net(), bc.Net)
+		return r
+	}
+	cause := "its quantity, price or discount was probably misread"
+	if pct, ok := unreadDiscount(poa, cfg); ok {
+		cause = fmt.Sprintf("most likely a %.2f%% discount the document prints was not read", pct)
+	}
+	r.Message = fmt.Sprintf(
+		"net computed from the extracted figures differs from BC by %+.2f (POA %.2f, BC %.2f), but the line total the acknowledgement prints (%.2f) agrees with BC: %s — check the document, not the price",
+		diff, poa.Net(), bc.Net, printed, cause)
 	return r
 }
 
@@ -233,7 +252,29 @@ func arithmeticCheck(poa POAProduct, cfg Config) ArithmeticCheckResult {
 	r.Message = fmt.Sprintf(
 		"the POA's own figures don't add up: net %.2f vs printed line total %.2f (diff %+.2f) — likely extraction misread",
 		poa.Net(), printed, diff)
+	if pct, ok := unreadDiscount(poa, cfg); ok {
+		r.Message += fmt.Sprintf("; no discount was read, and a %.2f%% discount would account for the difference", pct)
+	}
 	return r
+}
+
+// unreadDiscount returns the discount that would turn the line's gross into
+// the total it prints, when no discount was read at all and the printed total
+// is below the gross. It reports, never repairs: unlike a missing unit price
+// (fillMissingUnitPrice), one line cannot tell an unread discount from a
+// misread unit price, and filling one in would let a derived figure approve
+// an order. Ekornes (31.75%), M & A Moran (2%) and Calligaris (62.46%) layouts
+// print a discount the model does not capture, the same on every line.
+func unreadDiscount(poa POAProduct, cfg Config) (float64, bool) {
+	printed, ok := Deref(poa.LineTotal)
+	gross := float64(poa.Qty) * poa.UnitPrice
+	if !ok || poa.Qty <= 0 || poa.UnitPrice <= 0 || printed <= 0 || printed > gross-cfg.MoneyTolerance {
+		return 0, false
+	}
+	if poa.DiscountPercent != 0 || poa.DiscountAmount != 0 || poa.FurtherDiscountPercent != 0 || poa.FurtherDiscountAmount != 0 {
+		return 0, false
+	}
+	return (1 - printed/gross) * 100, true
 }
 
 // ---------------------------------------------------------------------------

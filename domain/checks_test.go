@@ -298,6 +298,89 @@ func TestPriceCheck(t *testing.T) {
 	}
 }
 
+// TestPriceCheck_MisreadFiguresPointAtTheDocument: when only the net computed
+// from the extracted columns disagrees — the printed line total agrees with
+// BC and not with those columns — the check still fails, but says to check
+// the document. A real difference keeps its plain wording.
+func TestPriceCheck_MisreadFiguresPointAtTheDocument(t *testing.T) {
+	tests := []struct {
+		name     string
+		poa      POAProduct
+		bcNet    float64
+		want     []string // substrings the message must carry
+		mustNot  string
+		arithHas string // substring the arithmetic message must carry, "" for none
+	}{
+		{
+			// PF132019 (Calligaris): list price read, discount not.
+			name:  "unread discount",
+			poa:   POAProduct{Qty: 1, UnitPrice: 6223, LineTotal: Ptr(2335.96)},
+			bcNet: 2335.96,
+			want:  []string{"+3887.04", "prints (2335.96) agrees with BC", "62.46% discount", "check the document"},
+			// The arithmetic check names the same discount.
+			arithHas: "a 62.46% discount would account for the difference",
+		},
+		{
+			// PF131627: quantity read as 0; the discount was read, so no
+			// discount is implied.
+			name:    "misread quantity",
+			poa:     POAProduct{Qty: 0, UnitPrice: 1475, DiscountPercent: 15, LineTotal: Ptr(1253.75)},
+			bcNet:   1253.75,
+			want:    []string{"agrees with BC", "quantity, price or discount was probably misread"},
+			mustNot: "discount the document prints",
+		},
+		{
+			// PF131896: the supplier's own figures agree; BC's price differs.
+			name:    "a real price difference",
+			poa:     POAProduct{Qty: 1, UnitPrice: 868, LineTotal: Ptr(868.0)},
+			bcNet:   742,
+			want:    []string{"net line value differs from BC by +126.00"},
+			mustNot: "check the document",
+		},
+		{
+			// The price message stays plain: the printed total does not agree
+			// with BC either. The arithmetic check never reads BC, so it still
+			// names the discount its own figures imply.
+			name:     "printed total disagrees with BC as well",
+			poa:      POAProduct{Qty: 1, UnitPrice: 6223, LineTotal: Ptr(2400.0)},
+			bcNet:    2335.96,
+			want:     []string{"net line value differs from BC by"},
+			mustNot:  "check the document",
+			arithHas: "a 61.43% discount would account for the difference",
+		},
+		{
+			name:    "no printed total",
+			poa:     POAProduct{Qty: 1, UnitPrice: 6223},
+			bcNet:   2335.96,
+			want:    []string{"net line value differs from BC by"},
+			mustNot: "check the document",
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got := priceCheck(tc.poa, BCProduct{Net: tc.bcNet}, cfg())
+			if !got.Failed() {
+				t.Fatalf("status = %q, want mismatch: rewording must never unblock", got.Status)
+			}
+			for _, w := range tc.want {
+				if !strings.Contains(got.Message, w) {
+					t.Errorf("message %q lacks %q", got.Message, w)
+				}
+			}
+			if tc.mustNot != "" && strings.Contains(got.Message, tc.mustNot) {
+				t.Errorf("message %q should not say %q", got.Message, tc.mustNot)
+			}
+			arith := arithmeticCheck(tc.poa, cfg())
+			if tc.arithHas != "" && !strings.Contains(arith.Message, tc.arithHas) {
+				t.Errorf("arithmetic message %q lacks %q", arith.Message, tc.arithHas)
+			}
+			if tc.arithHas == "" && strings.Contains(arith.Message, "would account for") {
+				t.Errorf("arithmetic message %q names a discount it cannot infer", arith.Message)
+			}
+		})
+	}
+}
+
 func TestQuantityCheck_PackRatio(t *testing.T) {
 	poa := POAProduct{Qty: 2, UnitPrice: 100}
 	bc := BCProduct{Qty: 4, UnitCost: 50}
