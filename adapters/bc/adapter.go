@@ -8,6 +8,7 @@ package bc
 import (
 	"context"
 	"errors"
+	"regexp"
 	"sort"
 	"strings"
 
@@ -21,10 +22,14 @@ import (
 // matching rather than failing an order. The resulting BCOrder records which
 // of those happened, so a check never claims BC holds no code when nobody
 // asked BC.
+//
+// Pages may be nil too. It is asked only for an order the v2.0 API says does
+// not exist; see orderpages.go for the order that made it necessary.
 type Source struct {
 	Orders *BCClient
+	Pages  *OrderPagesClient
 	Items  *CaseysClient
-	Log    func(format string, args ...any)
+	Log    func(ctx context.Context, format string, args ...any)
 }
 
 // Order fetches purchase order pf and builds the BC side of the comparison.
@@ -41,7 +46,7 @@ func (s *Source) Order(ctx context.Context, pf string) (domain.BCOrder, app.Orde
 	if names.Err != nil {
 		stats.ItemNamesError = names.Err.Error()
 		if s.Log != nil {
-			s.Log("item name lookup failed for %s, those lines compare on their own text: %s", pf, names.Err)
+			s.Log(ctx, "item name lookup failed for %s, those lines compare on their own text: %s", pf, names.Err)
 		}
 	}
 
@@ -64,8 +69,8 @@ func (s *Source) Order(ctx context.Context, pf string) (domain.BCOrder, app.Orde
 }
 
 // fetchOrder looks the purchase order up by the number printed on the
-// acknowledgement, falling back to the part before a "/" when Business
-// Central holds no such order.
+// acknowledgement, falling back to the part before a "/", then to the order
+// number embedded in it, when Business Central holds no such order.
 //
 // Suppliers annotate the number they print: an acknowledgement reading
 // "PF126282/EXC" answers purchase order PF126282, and BC has never heard of
@@ -78,27 +83,100 @@ func (s *Source) Order(ctx context.Context, pf string) (domain.BCOrder, app.Orde
 // OrderStats and printed on the report. Reconciling against a different order
 // than the one printed is a fact a reader must be told, not a convenience to
 // perform silently.
+//
+// Each number is asked of the v2.0 API and then, if that holds no such order,
+// of the OData pages, before the next number is tried: the printed number on
+// either surface beats a shortened one on the first.
 func (s *Source) fetchOrder(ctx context.Context, pf string, stats *app.OrderStats) (*PurchaseOrder, error) {
-	po, err := s.Orders.GetPurchaseOrder(ctx, pf)
+	po, err := s.lookup(ctx, pf, stats)
 	if err == nil {
 		return po, nil
 	}
-	base := baseOrderNumber(pf)
-	if base == "" || !errors.Is(err, ErrPurchaseOrderNotFound) {
+	if !errors.Is(err, ErrPurchaseOrderNotFound) {
 		return nil, err
 	}
 
-	fallback, ferr := s.Orders.GetPurchaseOrder(ctx, base)
-	if ferr != nil {
-		// Report the original number's failure: that is the one printed on
-		// the document, and the one a reader will be looking for.
+	for _, base := range fallbackOrderNumbers(pf) {
+		fallback, ferr := s.lookup(ctx, base, stats)
+		if errors.Is(ferr, ErrPurchaseOrderNotFound) {
+			continue
+		}
+		if ferr != nil {
+			// Report the original number's failure: that is the one printed
+			// on the document, and the one a reader will be looking for.
+			return nil, err
+		}
+		stats.OrderNumberUsed = base
+		if s.Log != nil {
+			s.Log(ctx, "purchase order %q not found in BC; matched %q instead", pf, base)
+		}
+		return fallback, nil
+	}
+	return nil, err
+}
+
+// lookup asks the v2.0 API for number and, when it answers that there is no
+// such order, the OData pages. Every "no such order" is logged with the URL
+// that produced it: the answer is an empty 200, indistinguishable in the
+// error from a wrong company, entity or filter unless the request is shown.
+func (s *Source) lookup(ctx context.Context, number string, stats *app.OrderStats) (*PurchaseOrder, error) {
+	po, err := s.Orders.GetPurchaseOrder(ctx, number)
+	if err == nil || !errors.Is(err, ErrPurchaseOrderNotFound) {
+		return po, err
+	}
+	s.logf(ctx, "BC holds no purchase order %q at GET %s", number, s.Orders.PurchaseOrderURL(number))
+	if s.Pages == nil {
 		return nil, err
 	}
-	stats.OrderNumberUsed = base
-	if s.Log != nil {
-		s.Log("purchase order %q not found in BC; matched %q instead", pf, base)
+
+	po, perr := s.Pages.GetPurchaseOrder(ctx, number)
+	if errors.Is(perr, ErrPurchaseOrderNotFound) {
+		s.logf(ctx, "BC holds no purchase order %q at GET %s", number, s.Pages.HeaderURL(number))
+		return nil, err
 	}
-	return fallback, nil
+	if perr != nil {
+		// The pages could not be read, which is not the same as the order not
+		// existing: say so rather than report the v2.0 "not found".
+		return nil, perr
+	}
+	stats.OrderReadFrom = orderHeaderPage + " and " + orderLinesPage
+	s.logf(ctx, "purchase order %q is missing from the v2.0 API; read from the %s pages instead", number, stats.OrderReadFrom)
+	return po, nil
+}
+
+func (s *Source) logf(ctx context.Context, format string, args ...any) {
+	if s.Log != nil {
+		s.Log(ctx, format, args...)
+	}
+}
+
+// fallbackOrderNumbers lists what to try, in order, once Business Central has
+// said the printed number does not exist: the part before a "/", then the
+// order number embedded in the text. Neither repeats the printed number or
+// the other.
+func fallbackOrderNumbers(pf string) []string {
+	var out []string
+	for _, c := range []string{baseOrderNumber(pf), embeddedOrderNumber(pf)} {
+		if c != "" && c != pf && (len(out) == 0 || out[0] != c) {
+			out = append(out, c)
+		}
+	}
+	return out
+}
+
+// orderNumberRe is an order number as BC files it: PF or SF and at least six
+// digits. All 520 captured orders are PF and exactly six; a shorter run is
+// more likely a fragment of something else than an order to reconcile against.
+var orderNumberRe = regexp.MustCompile(`(?:PF|SF)\d{6,}`)
+
+// embeddedOrderNumber returns the first order number inside pf, or "" when
+// there is none.
+//
+// The "/" rule alone could not read "PF^PF130191-CC34": the supplier wrapped
+// PF130191 in a prefix and a hyphenated suffix, and the acknowledgement
+// failed as "purchase order not found" for an order BC holds.
+func embeddedOrderNumber(pf string) string {
+	return orderNumberRe.FindString(pf)
 }
 
 // baseOrderNumber returns the part of an order number before the first "/",
@@ -137,7 +215,7 @@ func (s *Source) enrich(ctx context.Context, pf string, order *domain.BCOrder, s
 		order.EnrichmentNote = err.Error()
 		stats.EnrichmentError = err.Error()
 		if s.Log != nil {
-			s.Log("CaseysItems enrichment failed for %s, continuing without it: %s", pf, err)
+			s.Log(ctx, "CaseysItems enrichment failed for %s, continuing without it: %s", pf, err)
 		}
 		// Partial batches still come back alongside the error, so carry on
 		// and attach whatever arrived.
@@ -184,10 +262,15 @@ func toItemDetail(item CaseysItem) domain.ItemDetail {
 // groupLines walks lines in sequence order, starting a new product on each
 // value-bearing line and attaching the following Comment lines to it.
 //
-// Account lines start a product too. When only "Item" did, a surcharge line
-// (G/L 718000, "Vendor Surcharges") never became a product: it could not be
-// matched, and the matched total was short by exactly that amount on every
-// Ashwood order.
+// Every line that is not text starts a product, whatever its type. When only
+// "Item" did, a surcharge line (G/L 718000, "Vendor Surcharges") never became
+// a product: it could not be matched, and the matched total was short by
+// exactly that amount on every Ashwood order. The fix then listed the types
+// it knew — Item, Account, Fixed Asset, Resource — which repeated the same
+// mistake for "Charge", the API's name for an item charge (freight, delivery,
+// duty): that line fell through the switch and vanished from the order while
+// its money stayed in BC's header total. An allowlist of value-bearing types
+// drops whatever BC adds next; a line is a qualifier only when it is text.
 func groupLines(lines []PurchaseOrderLine) []domain.BCProduct {
 	sorted := make([]PurchaseOrderLine, len(lines))
 	copy(sorted, lines)
@@ -195,8 +278,8 @@ func groupLines(lines []PurchaseOrderLine) []domain.BCProduct {
 
 	var products []domain.BCProduct
 	for _, l := range sorted {
-		switch l.LineType {
-		case "Item", "Account", "G/L Account", "Fixed Asset", "Resource":
+		switch {
+		case !isTextLine(l):
 			products = append(products, domain.BCProduct{
 				LineID:          l.ID,
 				ItemNo:          l.LineObjectNumber,
@@ -211,16 +294,27 @@ func groupLines(lines []PurchaseOrderLine) []domain.BCProduct {
 				DiscountAmount:  l.DiscountAmount,
 				Net:             l.NetAmount,
 			})
-		case "Comment":
-			if len(products) > 0 {
-				last := &products[len(products)-1]
-				last.Comments = append(last.Comments, l.Description)
-			}
-			// A Comment before any value line has no owner; dropping it is
-			// correct — it is a document header, not a line qualifier.
+		case len(products) > 0:
+			last := &products[len(products)-1]
+			last.Comments = append(last.Comments, l.Description)
 		}
+		// A text line before any value line has no owner; dropping it is
+		// correct — it is a document header, not a line qualifier.
 	}
 	return products
+}
+
+// isTextLine reports whether l only qualifies the line above it. The API
+// reports BC's blank-type text line as "Comment"; a line with no type at all
+// is treated the same only while it carries nothing a product could — no
+// number, quantity or money — so an unexpected empty type can never hide a
+// value line the way an unlisted one used to.
+func isTextLine(l PurchaseOrderLine) bool {
+	if l.LineType == "Comment" {
+		return true
+	}
+	return strings.TrimSpace(l.LineType) == "" && l.LineObjectNumber == "" &&
+		l.Quantity == 0 && l.DirectUnitCost == 0 && l.NetAmount == 0
 }
 
 // mergedDescription builds the text the comparison actually reads: the item's

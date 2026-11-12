@@ -20,7 +20,9 @@ import (
 // Scanner turns a supplier PDF into POA orders.
 type Scanner struct {
 	Client *DocIntelClient
-	Log    func(format string, args ...any)
+	// Log takes the request's context so the host can file each line under
+	// the invocation it belongs to; see handler.logf in poa-func.
+	Log func(ctx context.Context, format string, args ...any)
 }
 
 // Scan analyses pdf with the supplier's custom model and extracts one
@@ -33,12 +35,12 @@ func (s *Scanner) Scan(ctx context.Context, pdf []byte, modelID string) ([]domai
 	if len(result.Documents) == 0 {
 		return nil, fmt.Errorf("no document recognised in file")
 	}
-	return s.extractOrders(result.Documents), nil
+	return s.extractOrders(ctx, result.Documents), nil
 }
 
-func (s *Scanner) logf(format string, args ...any) {
+func (s *Scanner) logf(ctx context.Context, format string, args ...any) {
 	if s.Log != nil {
-		s.Log(format, args...)
+		s.Log(ctx, format, args...)
 		return
 	}
 	log.Printf(format, args...)
@@ -50,7 +52,7 @@ var pageFieldRe = regexp.MustCompile(`^(.+) - Page (\d+)$`)
 // (WhiteMeadow send several acknowledgements to a PDF). It also tolerates
 // Document Intelligence genuinely returning more than one document, by running
 // the same per-instance expansion against each.
-func (s *Scanner) extractOrders(docs []Document) []domain.POAOrder {
+func (s *Scanner) extractOrders(ctx context.Context, docs []Document) []domain.POAOrder {
 	var all []domain.POAOrder
 	for _, doc := range docs {
 		n := maxInstance(doc.Fields)
@@ -59,7 +61,7 @@ func (s *Scanner) extractOrders(docs []Document) []domain.POAOrder {
 			if poNumber.Content == "" {
 				continue // unused instance slot
 			}
-			all = append(all, s.extractOrderAt(doc.Fields, i, poNumber.Content))
+			all = append(all, s.extractOrderAt(ctx, doc.Fields, i, poNumber.Content))
 		}
 	}
 	return all
@@ -96,7 +98,7 @@ func fieldForInstance(fields map[string]Field, name string, instance int) Field 
 	return fields[fmt.Sprintf("%s - Page %d", name, instance)]
 }
 
-func (s *Scanner) extractOrderAt(fields map[string]Field, instance int, pf string) domain.POAOrder {
+func (s *Scanner) extractOrderAt(ctx context.Context, fields map[string]Field, instance int, pf string) domain.POAOrder {
 	delDate := fieldForInstance(fields, "Proposed Delivery Date", instance)
 	reference := fieldForInstance(fields, "Reference Number", instance)
 	totalExVAT := fieldForInstance(fields, "Total Order Amount - exVAT", instance)
@@ -105,9 +107,9 @@ func (s *Scanner) extractOrderAt(fields map[string]Field, instance int, pf strin
 
 	o := domain.POAOrder{
 		PF:         pf,
-		TotalExVAT: s.moneyPtr(pf, "total amount exVAT", totalExVAT.Content),
+		TotalExVAT: s.moneyPtr(ctx, pf, "total amount exVAT", totalExVAT.Content),
 		// Taken off the ex-VAT total; "5%" is a rate, anything else an amount.
-		OrderDiscount:          s.moneyPtr(pf, "order discount", orderDiscount.Content),
+		OrderDiscount:          s.moneyPtr(ctx, pf, "order discount", orderDiscount.Content),
 		OrderDiscountIsPercent: strings.Contains(orderDiscount.Content, "%"),
 		ProposedDeliveryDate:   strings.TrimSpace(delDate.Content),
 		// The label is sometimes captured along with the value ("Ack No:\n2332206").
@@ -126,20 +128,24 @@ func (s *Scanner) extractOrderAt(fields map[string]Field, instance int, pf strin
 			Description:     vo["Description"].Content,
 			Description2:    vo["Description 2"].Content,
 			Description3:    vo["Description 3"].Content,
-			Qty:             int(s.money(pf, "qty", vo["Qty"].Content)),
-			UnitPrice:       s.money(pf, "unit price", vo["Unit Product Price"].Content),
-			DiscountPercent: s.money(pf, "discount %", vo["Discount%"].Content),
-			DiscountAmount:  s.money(pf, "discount amount", vo["Discount Amount"].Content),
+			Qty:             int(s.money(ctx, pf, "qty", vo["Qty"].Content)),
+			UnitPrice:       s.money(ctx, pf, "unit price", vo["Unit Product Price"].Content),
+			DiscountPercent: s.money(ctx, pf, "discount %", vo["Discount%"].Content),
+			DiscountAmount:  s.money(ctx, pf, "discount amount", vo["Discount Amount"].Content),
 			// Compounds on the first discount; see POAProduct.Net.
-			FurtherDiscountPercent: s.money(pf, "further discount %", vo["Further Discount %"].Content),
-			FurtherDiscountAmount:  s.money(pf, "further discount amount", vo["Further Discount Amount"].Content),
-			LineTotal:              s.moneyPtr(pf, "line total", vo["Total Product Qty Price"].Content),
+			FurtherDiscountPercent: s.money(ctx, pf, "further discount %", vo["Further Discount %"].Content),
+			FurtherDiscountAmount:  s.money(ctx, pf, "further discount amount", vo["Further Discount Amount"].Content),
+			LineTotal:              s.moneyPtr(ctx, pf, "line total", vo["Total Product Qty Price"].Content),
 		}
 		if blankLine(p) {
-			s.logf("extract: %s: dropped line %d, which carries no text, quantity or money", pf, n+1)
+			s.logf(ctx, "extract: %s: dropped line %d, which carries no text, quantity or money", pf, n+1)
 			continue
 		}
 		p.Code, p.Description = splitSpilledCode(p.Code, p.Description)
+		if fillMissingUnitPrice(&p) {
+			s.logf(ctx, "extract: %s: line %d has no unit price; derived %.2f from its line total %.2f over qty %d",
+				pf, n+1, p.UnitPrice, *p.LineTotal, p.Qty)
+		}
 		o.Products = append(o.Products, p)
 	}
 	return o
@@ -157,6 +163,29 @@ func blankLine(p domain.POAProduct) bool {
 	}
 	total, _ := domain.Deref(p.LineTotal)
 	return p.Qty == 0 && p.UnitPrice == 0 && total == 0
+}
+
+// fillMissingUnitPrice repairs a row whose unit price came back blank or zero
+// while its quantity and printed line total did not, setting the unit price to
+// line total / qty. It reports whether it changed p.
+//
+// PF131566 (Parker Knoll SO374591): the first row after the table carried
+// onto page 2 lost its £369.00 unit price although the PDF prints it, so the
+// line counted as £0 and the seven-line group it belonged to failed on price.
+//
+// Only an undiscounted line is repaired. There the total is exactly qty × unit
+// price; with a discount the unit price cannot be recovered without trusting
+// one discount column over another, so the arithmetic check is left to flag it.
+func fillMissingUnitPrice(p *domain.POAProduct) bool {
+	total, ok := domain.Deref(p.LineTotal)
+	if p.UnitPrice != 0 || p.Qty <= 0 || !ok || total <= 0 {
+		return false
+	}
+	if p.DiscountPercent != 0 || p.DiscountAmount != 0 || p.FurtherDiscountPercent != 0 || p.FurtherDiscountAmount != 0 {
+		return false
+	}
+	p.UnitPrice = total / float64(p.Qty)
+	return true
 }
 
 // splitSpilledCode repairs a row whose whole text landed in the Product
@@ -266,10 +295,10 @@ func normaliseSeparators(s string) string {
 
 // money parses a required field, logging loudly when content was present but
 // unparseable — the failure mode that silently produced zeros before.
-func (s *Scanner) money(pf, field, content string) float64 {
+func (s *Scanner) money(ctx context.Context, pf, field, content string) float64 {
 	v, ok := parseMoney(content)
 	if !ok && strings.TrimSpace(content) != "" {
-		s.logf("extract: %s: unparseable %s %q — treating as 0", pf, field, content)
+		s.logf(ctx, "extract: %s: unparseable %s %q — treating as 0", pf, field, content)
 	}
 	return v
 }
@@ -277,13 +306,13 @@ func (s *Scanner) money(pf, field, content string) float64 {
 // moneyPtr parses an optional field. A blank field returns nil, not zero:
 // several suppliers print no line-total column at all, and treating that as
 // 0.00 failed every one of their lines.
-func (s *Scanner) moneyPtr(pf, field, content string) *float64 {
+func (s *Scanner) moneyPtr(ctx context.Context, pf, field, content string) *float64 {
 	if strings.TrimSpace(content) == "" {
 		return nil
 	}
 	v, ok := parseMoney(content)
 	if !ok {
-		s.logf("extract: %s: unparseable %s %q — treating as absent", pf, field, content)
+		s.logf(ctx, "extract: %s: unparseable %s %q — treating as absent", pf, field, content)
 		return nil
 	}
 	return domain.Ptr(v)

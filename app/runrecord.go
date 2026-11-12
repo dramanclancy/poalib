@@ -30,6 +30,9 @@ type RunRecord struct {
 	// Business Central does not hold, and a shorter form of it was matched
 	// instead. Empty when the printed number matched directly.
 	OrderNumberUsed string `json:"orderNumberUsed,omitempty"`
+	// OrderReadFrom is set when the v2.0 API held no such order and it was
+	// read from the named OData pages instead. Empty otherwise.
+	OrderReadFrom   string `json:"orderReadFrom,omitempty"`
 	BCLinesFetched  int    `json:"bcLinesFetched"`
 	BCProductsBuilt int    `json:"bcProductsBuilt"`
 
@@ -88,6 +91,9 @@ func (r RunRecord) Degradations() []string {
 		if r.ItemsWithCodes == 0 {
 			out = append(out, "No returned item carried a Vendor_Item_No or Model_No, so exact-code identity was unavailable on every line.")
 		}
+	}
+	if r.OrderReadFrom != "" {
+		out = append(out, fmt.Sprintf("Business Central's standard purchase order API did not return this order, so it was read from the %s pages: line discounts are worked out from each line's amount, not read.", r.OrderReadFrom))
 	}
 	// Only a failed lookup counts. An item number BC holds no record for is
 	// reported on the Summary sheet but is a data fact, not a degraded run.

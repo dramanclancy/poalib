@@ -40,7 +40,8 @@ type CaseysItem struct {
 }
 
 type caseysItemsResponse struct {
-	Value []CaseysItem `json:"value"`
+	Value    []CaseysItem `json:"value"`
+	NextLink string       `json:"@odata.nextLink"`
 }
 
 // caseysChunkSize caps how many item numbers go into one $filter — OData URL
@@ -111,9 +112,13 @@ func (c *CaseysClient) doRequest(ctx context.Context, pathAndQuery string) ([]by
 // treat a missing entry exactly like a failed lookup (BCProduct.Detail stays
 // nil), never as an error.
 //
-// On a mid-batch failure this returns whatever chunks already succeeded
-// alongside the error, so a caller that chooses to degrade rather than fail
-// the whole order (see Source.enrich) still gets partial enrichment.
+// A failing chunk does not stop the others: every chunk that succeeded is
+// returned alongside the first error, so a caller that degrades rather than
+// failing the order (see Source.enrich) still gets the rest. It used to
+// return at the first failure, so on an order of more than caseysChunkSize
+// items one transient error in the first chunk cost every later chunk too —
+// unlike BCClient.GetItems, which already carried on. A paged response counts
+// as failing, with its first page kept.
 func (c *CaseysClient) GetItemsByNumbers(ctx context.Context, numbers []string) (map[string]CaseysItem, error) {
 	out := make(map[string]CaseysItem, len(numbers))
 
@@ -127,31 +132,42 @@ func (c *CaseysClient) GetItemsByNumbers(ctx context.Context, numbers []string) 
 		unique = append(unique, n)
 	}
 
+	var firstErr error
 	for start := 0; start < len(unique); start += caseysChunkSize {
 		end := min(start+caseysChunkSize, len(unique))
-		chunk := unique[start:end]
-
-		clauses := make([]string, len(chunk))
-		for i, n := range chunk {
-			clauses[i] = fmt.Sprintf("No eq '%s'", escapeODataString(n))
+		items, err := c.getChunk(ctx, unique[start:end])
+		if err != nil && firstErr == nil {
+			firstErr = fmt.Errorf("fetching CaseysItems batch %d-%d: %w", start, end, err)
 		}
-		params := url.Values{}
-		params.Set("$filter", strings.Join(clauses, " or "))
-
-		body, status, err := c.doRequest(ctx, "?"+params.Encode())
-		if err != nil {
-			return out, fmt.Errorf("fetching CaseysItems batch %d-%d: %w", start, end, err)
-		}
-		if status != http.StatusOK {
-			return out, fmt.Errorf("CaseysItems API returned %d: %s", status, string(body))
-		}
-		var parsed caseysItemsResponse
-		if err := json.Unmarshal(body, &parsed); err != nil {
-			return out, fmt.Errorf("parsing CaseysItems response: %w", err)
-		}
-		for _, item := range parsed.Value {
+		for _, item := range items {
 			out[item.No] = item
 		}
 	}
-	return out, nil
+	return out, firstErr
+}
+
+// getChunk fetches one batch of item numbers.
+func (c *CaseysClient) getChunk(ctx context.Context, chunk []string) ([]CaseysItem, error) {
+	clauses := make([]string, len(chunk))
+	for i, n := range chunk {
+		clauses[i] = fmt.Sprintf("No eq '%s'", escapeODataString(n))
+	}
+	params := url.Values{}
+	params.Set("$filter", strings.Join(clauses, " or "))
+
+	body, status, err := c.doRequest(ctx, "?"+params.Encode())
+	if err != nil {
+		return nil, err
+	}
+	if status != http.StatusOK {
+		return nil, fmt.Errorf("CaseysItems API returned %d: %s", status, string(body))
+	}
+	var parsed caseysItemsResponse
+	if err := json.Unmarshal(body, &parsed); err != nil {
+		return nil, fmt.Errorf("parsing CaseysItems response: %w", err)
+	}
+	if parsed.NextLink != "" {
+		return parsed.Value, errTruncated
+	}
+	return parsed.Value, nil
 }

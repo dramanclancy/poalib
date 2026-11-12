@@ -54,3 +54,8 @@ azure-func.zip
 # Captured fixtures hold real supplier orders (names, prices, BC IDs).
 # Keep them local; the README explains how to fill the corpus.
 testdata/orders/*.json
+# The labelling workbook TestCorpus_ExportGoldSet writes holds the same data.
+testdata/goldset/
+# Stored Document Intelligence answers hold the same real order data.
+# adapters/docintel/fixture_test.go skips without them and says how to add one.
+adapters/docintel/testdata/*.json

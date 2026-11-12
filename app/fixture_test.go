@@ -2,6 +2,7 @@ package app
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -44,7 +45,7 @@ func TestFixtureWriter_DisabledWritesNothing(t *testing.T) {
 		t.Fatal("writer reports enabled when capture is off")
 	}
 	poa, bc, res := sample()
-	path, err := w.Write(RunRecord{}, poa, bc, res)
+	path, err := w.Write(context.Background(), RunRecord{}, poa, bc, res)
 	if err != nil || path != "" {
 		t.Errorf("Write returned (%q, %v), want empty and no error", path, err)
 	}
@@ -59,12 +60,12 @@ func TestFixtureWriter_DisabledWritesNothing(t *testing.T) {
 func TestFixtureWriter_CreatesDirectoryAndFile(t *testing.T) {
 	dir := filepath.Join(t.TempDir(), "testdata", "orders")
 	var logged string
-	w := NewFixtureWriter(true, dir, func(format string, args ...any) { logged = format })
+	w := NewFixtureWriter(true, dir, func(_ context.Context, format string, args ...any) { logged = format })
 
 	poa, bc, res := sample()
 	rec := RunRecord{PF: res.POA.PF, StartedAt: time.Date(2026, 9, 4, 10, 15, 0, 0, time.UTC)}
 
-	path, err := w.Write(rec, poa, bc, res)
+	path, err := w.Write(context.Background(), rec, poa, bc, res)
 	if err != nil {
 		t.Fatalf("Write: %v", err)
 	}
@@ -96,12 +97,12 @@ func TestFixtureWriter_NeverOverwrites(t *testing.T) {
 	poa, bc, res := sample()
 	rec := RunRecord{PF: res.POA.PF, StartedAt: time.Date(2026, 9, 4, 10, 15, 0, 0, time.UTC)}
 
-	first, err := w.Write(rec, poa, bc, res)
+	first, err := w.Write(context.Background(), rec, poa, bc, res)
 	if err != nil {
 		t.Fatalf("first write: %v", err)
 	}
 	poa, bc, res = changed()
-	second, err := w.Write(rec, poa, bc, res)
+	second, err := w.Write(context.Background(), rec, poa, bc, res)
 	if err != nil {
 		t.Fatalf("second write: %v", err)
 	}
@@ -122,7 +123,7 @@ func TestFixture_ReplaysWithoutAnyService(t *testing.T) {
 	w := NewFixtureWriter(true, dir, nil)
 	poa, bc, res := sample()
 
-	path, err := w.Write(RunRecord{PF: res.POA.PF, StartedAt: time.Now()}, poa, bc, res)
+	path, err := w.Write(context.Background(), RunRecord{PF: res.POA.PF, StartedAt: time.Now()}, poa, bc, res)
 	if err != nil {
 		t.Fatalf("Write: %v", err)
 	}
@@ -152,7 +153,7 @@ func TestFixture_ReplaysWithoutAnyService(t *testing.T) {
 func TestFixtureWriter_SkipsUnchangedContent(t *testing.T) {
 	dir := t.TempDir()
 	var logged []string
-	w := NewFixtureWriter(true, dir, func(format string, args ...any) {
+	w := NewFixtureWriter(true, dir, func(_ context.Context, format string, args ...any) {
 		logged = append(logged, fmt.Sprintf(format, args...))
 	})
 	at := func(day int) RunRecord {
@@ -160,11 +161,11 @@ func TestFixtureWriter_SkipsUnchangedContent(t *testing.T) {
 	}
 
 	poa, bc, res := sample()
-	first, err := w.Write(at(4), poa, bc, res)
+	first, err := w.Write(context.Background(), at(4), poa, bc, res)
 	if err != nil {
 		t.Fatal(err)
 	}
-	again, err := w.Write(at(5), poa, bc, res)
+	again, err := w.Write(context.Background(), at(5), poa, bc, res)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -176,10 +177,10 @@ func TestFixtureWriter_SkipsUnchangedContent(t *testing.T) {
 	}
 
 	cpoa, cbc, cres := changed()
-	if _, err := w.Write(at(6), cpoa, cbc, cres); err != nil {
+	if _, err := w.Write(context.Background(), at(6), cpoa, cbc, cres); err != nil {
 		t.Fatal(err)
 	}
-	back, err := w.Write(at(7), poa, bc, res)
+	back, err := w.Write(context.Background(), at(7), poa, bc, res)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -201,7 +202,7 @@ func TestFixtureWriter_SkipsAcrossSchemas(t *testing.T) {
 	writeSchemaOne(t, old, poa, bc, res)
 
 	w := NewFixtureWriter(true, dir, nil)
-	got, err := w.Write(RunRecord{StartedAt: time.Date(2026, 9, 5, 0, 0, 0, 0, time.UTC)}, poa, bc, res)
+	got, err := w.Write(context.Background(), RunRecord{StartedAt: time.Date(2026, 9, 5, 0, 0, 0, 0, time.UTC)}, poa, bc, res)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -241,7 +242,7 @@ func TestFixture_StoresEachEmbeddingOnce(t *testing.T) {
 	dir := t.TempDir()
 	w := NewFixtureWriter(true, dir, nil)
 	poa, bc, res := sample()
-	path, err := w.Write(RunRecord{StartedAt: time.Now()}, poa, bc, res)
+	path, err := w.Write(context.Background(), RunRecord{StartedAt: time.Now()}, poa, bc, res)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -281,7 +282,7 @@ func TestFixture_ReencodesByteIdentically(t *testing.T) {
 	dir := t.TempDir()
 	poa, bc, res := sample()
 	w := NewFixtureWriter(true, dir, nil)
-	two, err := w.Write(RunRecord{StartedAt: time.Now()}, poa, bc, res)
+	two, err := w.Write(context.Background(), RunRecord{StartedAt: time.Now()}, poa, bc, res)
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -3,6 +3,7 @@ package bc
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"strings"
@@ -97,6 +98,69 @@ func TestCaseysClient_GetItemsByNumbers_Chunks(t *testing.T) {
 }
 
 func itemNoAt(i int) string { return "IT" + string(rune('A'+i%26)) + string(rune('0'+i/26)) }
+
+// TestCaseysClient_GetItemsByNumbers_FailureCostsOnlyItsChunk: a failing
+// chunk is reported, and every other chunk still arrives. It used to return
+// at the first failure, so one transient error in the first twenty items of a
+// long order left every later item without codes or seat counts.
+func TestCaseysClient_GetItemsByNumbers_FailureCostsOnlyItsChunk(t *testing.T) {
+	failing := itemNoAt(0) // in the first chunk
+	var requests int
+	c := &CaseysClient{
+		cred:    fakeCredential{},
+		baseURL: "https://example.invalid/ODataV4/Company('Test')/CaseysItems",
+		httpClient: &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+			requests++
+			filter := r.URL.Query().Get("$filter")
+			if strings.Contains(filter, "'"+failing+"'") {
+				return &http.Response{StatusCode: http.StatusServiceUnavailable, Body: io.NopCloser(strings.NewReader("busy")), Header: make(http.Header)}, nil
+			}
+			var value []CaseysItem
+			for _, clause := range strings.Split(filter, " or ") {
+				value = append(value, CaseysItem{No: strings.Trim(strings.TrimPrefix(clause, "No eq "), "'")})
+			}
+			body, _ := json.Marshal(caseysItemsResponse{Value: value})
+			return &http.Response{StatusCode: http.StatusOK, Body: io.NopCloser(strings.NewReader(string(body))), Header: make(http.Header)}, nil
+		})},
+	}
+	numbers := make([]string, 45) // chunks of 20/20/5; the first fails
+	for i := range numbers {
+		numbers[i] = itemNoAt(i)
+	}
+
+	items, err := c.GetItemsByNumbers(context.Background(), numbers)
+
+	if err == nil {
+		t.Error("the failed chunk was not reported")
+	}
+	if requests != 3 {
+		t.Errorf("issued %d requests, want 3: a failure must not stop the chunks after it", requests)
+	}
+	if len(items) != 25 {
+		t.Errorf("returned %d items, want the 25 from the two chunks that succeeded", len(items))
+	}
+}
+
+// TestCaseysClient_GetItemsByNumbers_PagedResponseIsReported mirrors the
+// BCClient case: keep the first page, say it was cut off.
+func TestCaseysClient_GetItemsByNumbers_PagedResponseIsReported(t *testing.T) {
+	c := &CaseysClient{
+		cred:    fakeCredential{},
+		baseURL: "https://example.invalid/ODataV4/Company('Test')/CaseysItems",
+		httpClient: &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+			body := `{"value":[{"No":"IT1","Vendor_Item_No":"013-D"}],"@odata.nextLink":"https://example.invalid/next"}`
+			return &http.Response{StatusCode: http.StatusOK, Body: io.NopCloser(strings.NewReader(body)), Header: make(http.Header)}, nil
+		})},
+	}
+
+	items, err := c.GetItemsByNumbers(context.Background(), []string{"IT1", "IT2"})
+	if !errors.Is(err, errTruncated) {
+		t.Errorf("err = %v, want errTruncated", err)
+	}
+	if items["IT1"].VendorItemNo != "013-D" {
+		t.Errorf("items = %+v, want the first page kept", items)
+	}
+}
 
 // TestCaseysItem_DecodesTheWireFormat pins the JSON tags against a literal
 // body rather than against the struct's own output.

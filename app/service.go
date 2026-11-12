@@ -2,6 +2,7 @@ package app
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log"
 	"strings"
@@ -21,7 +22,9 @@ type Service struct {
 	Fixtures *FixtureWriter
 
 	Config domain.Config
-	Log    func(format string, args ...any)
+	// Log takes the request's context: the Functions host only shows a line
+	// that carries the invocation it was written under.
+	Log func(ctx context.Context, format string, args ...any)
 }
 
 // Outcome is one reconciled purchase order: either a completed result and the
@@ -36,9 +39,9 @@ type Outcome struct {
 	Err    error
 }
 
-func (s *Service) logf(format string, args ...any) {
+func (s *Service) logf(ctx context.Context, format string, args ...any) {
 	if s.Log != nil {
-		s.Log(format, args...)
+		s.Log(ctx, format, args...)
 		return
 	}
 	log.Printf(format, args...)
@@ -87,6 +90,42 @@ func normalisePF(pf string) string {
 	return "PF" + pf
 }
 
+// ErrNoLineFigures reports an acknowledgement whose lines were all read with no
+// quantity, price or printed line total, so there is nothing to reconcile.
+//
+// Kristensen & Kristensen send a customs document — HS tariff codes, country
+// of origin, no prices — alongside each order confirmation, and it carries the
+// PF too. Reconciled as an acknowledgement, PF131891's arrived twelve seconds
+// after the confirmation had been accepted and reported the same order as
+// short by 1388.90; PF132080's paired the care oil with the dining table and
+// called the table itself a harmless note. Whitemeadow and De Poortere
+// documents have done the same when the model read the PF and total but not
+// the table. Every line then fails on quantity and price, which names a
+// symptom; the fault is the document or the model, and that is what to say.
+var ErrNoLineFigures = errors.New("no acknowledgement line was read with a quantity, price or line total")
+
+// carriesLineFigures reports whether any line of o has a quantity, unit price
+// or printed line total: the least a line needs before it can be compared.
+func carriesLineFigures(o domain.POAOrder) bool {
+	for _, p := range o.Products {
+		if total, _ := domain.Deref(p.LineTotal); p.Qty != 0 || p.UnitPrice != 0 || total != 0 {
+			return true
+		}
+	}
+	return false
+}
+
+// noLineFigures is the error for an order carriesLineFigures rejects, keeping
+// the one figure the document may still have yielded.
+func noLineFigures(o domain.POAOrder) error {
+	stated := ""
+	if t, ok := domain.Deref(o.TotalExVAT); ok {
+		stated = fmt.Sprintf(", order total %.2f stated", t)
+	}
+	return fmt.Errorf("%w (%d line(s) read%s), so nothing was reconciled. Either the document is not an acknowledgement (an invoice, packing list or customs document sent with one), or the model did not read its table",
+		ErrNoLineFigures, len(o.Products), stated)
+}
+
 func (s *Service) reconcileOne(ctx context.Context, poaOrder domain.POAOrder, pages int) Outcome {
 	rec := RunRecord{
 		PF:                poaOrder.PF,
@@ -102,11 +141,21 @@ func (s *Service) reconcileOne(ctx context.Context, poaOrder domain.POAOrder, pa
 		rec.EmbeddingModel = s.Embedder.Describe()
 	}
 
+	// Before Business Central is asked anything: a workbook of quantity and
+	// price failures here would contradict, and may replace, the real
+	// acknowledgement's for the same PF.
+	if !carriesLineFigures(poaOrder) {
+		err := noLineFigures(poaOrder)
+		s.logf(ctx, "%s: %s", poaOrder.PF, err)
+		return Outcome{PF: poaOrder.PF, Run: rec, Err: err}
+	}
+
 	bcOrder, stats, err := s.Orders.Order(ctx, poaOrder.PF)
 	if err != nil {
 		return Outcome{PF: poaOrder.PF, Run: rec, Err: err}
 	}
 	rec.OrderNumberUsed = stats.OrderNumberUsed
+	rec.OrderReadFrom = stats.OrderReadFrom
 	rec.BCLinesFetched = stats.LinesFetched
 	rec.BCProductsBuilt = len(bcOrder.Products)
 	rec.ItemNamesRequested = stats.ItemNamesRequested
@@ -129,22 +178,26 @@ func (s *Service) reconcileOne(ctx context.Context, poaOrder domain.POAOrder, pa
 	rec.LinesFlagged = len(result.Flagged())
 
 	if rec.OrderNumberUsed != "" {
-		s.logf("%s: no such purchase order in BC; reconciled against %s instead",
+		s.logf(ctx, "%s: no such purchase order in BC; reconciled against %s instead",
 			poaOrder.PF, rec.OrderNumberUsed)
 	}
+	if rec.BCLinesFetched == 0 {
+		s.logf(ctx, "%s: Business Central returned the order (status %q) with no lines; every acknowledged line is unmatched",
+			poaOrder.PF, bcOrder.Status)
+	}
 	if rec.Degraded() {
-		s.logf("%s reconciled in a degraded state: %s", poaOrder.PF, rec.Summary())
+		s.logf(ctx, "%s reconciled in a degraded state: %s", poaOrder.PF, rec.Summary())
 	}
 
 	// Capture after the comparison, so the fixture carries the result to
 	// replay against.
 	if s.Fixtures.Enabled() {
-		path, err := s.Fixtures.Write(rec, poaOrder, bcOrder, result)
+		path, err := s.Fixtures.Write(ctx, rec, poaOrder, bcOrder, result)
 		if err != nil {
 			// Capture is a development aid. Losing it must never fail an
 			// order that reconciled correctly.
 			rec.FixtureError = err.Error()
-			s.logf("capturing fixture for %s: %s", poaOrder.PF, err)
+			s.logf(ctx, "capturing fixture for %s: %s", poaOrder.PF, err)
 		} else {
 			rec.FixturePath = path
 		}

@@ -1,8 +1,13 @@
 package docintel
 
 import (
+	"context"
+	"fmt"
+	"os"
+	"path/filepath"
 	"testing"
 
+	"github.com/dramanclancy/poalib/app"
 	"github.com/dramanclancy/poalib/domain"
 )
 
@@ -34,7 +39,7 @@ func TestExtractOrders_SeveralPurchaseOrdersInOneFile(t *testing.T) {
 		"Order Details - Page 3":      {ValueArray: []Field{row("ghost", "1", "1", "1")}},
 	}}
 
-	got := (&Scanner{Log: func(string, ...any) {}}).extractOrders([]Document{doc})
+	got := (&Scanner{Log: func(context.Context, string, ...any) {}}).extractOrders(context.Background(), []Document{doc})
 
 	if len(got) != 2 {
 		t.Fatalf("extracted %d orders, want 2 (slot 3 has no order number)", len(got))
@@ -83,7 +88,7 @@ func TestExtractOrders_OrderDiscount(t *testing.T) {
 				"Product": {Content: "LAW45"}, "Qty": {Content: "1.00"}, "Unit Product Price": {Content: "199.0000"},
 			}}}},
 		}}
-		got := (&Scanner{Log: func(string, ...any) {}}).extractOrders([]Document{doc})
+		got := (&Scanner{Log: func(context.Context, string, ...any) {}}).extractOrders(context.Background(), []Document{doc})
 		if len(got) != 1 {
 			t.Fatalf("%q: extracted %d orders", tc.content, len(got))
 		}
@@ -111,7 +116,7 @@ func TestExtractOrders_FurtherDiscount(t *testing.T) {
 			"Further Discount Amount": {Content: ""},
 		}}}},
 	}}
-	got := (&Scanner{Log: func(string, ...any) {}}).extractOrders([]Document{doc})
+	got := (&Scanner{Log: func(context.Context, string, ...any) {}}).extractOrders(context.Background(), []Document{doc})
 	if len(got) != 1 || len(got[0].Products) != 1 {
 		t.Fatalf("extracted %+v", got)
 	}
@@ -188,7 +193,7 @@ func TestExtractOrders_DropsBlankRowsAndSplitsSpilledCodes(t *testing.T) {
 		}},
 	}}
 
-	got := (&Scanner{Log: func(string, ...any) {}}).extractOrders([]Document{doc})[0].Products
+	got := (&Scanner{Log: func(context.Context, string, ...any) {}}).extractOrders(context.Background(), []Document{doc})[0].Products
 
 	want := []struct{ code, desc string }{
 		{"CA24", "Natural Indulge"},
@@ -203,5 +208,95 @@ func TestExtractOrders_DropsBlankRowsAndSplitsSpilledCodes(t *testing.T) {
 		if got[i].Code != w.code || got[i].Description != w.desc {
 			t.Errorf("line %d = (%q, %q), want (%q, %q)", i, got[i].Code, got[i].Description, w.code, w.desc)
 		}
+	}
+}
+
+// TestExtractOrders_FillsMissingUnitPrice: a row whose unit price came back
+// blank, with a quantity and a printed line total, takes its unit price from
+// the total. Discounted rows, rows without a total and rows without a
+// quantity are left as extracted.
+func TestExtractOrders_FillsMissingUnitPrice(t *testing.T) {
+	row := func(product, qty, unit, discount, total string) Field {
+		return Field{ValueObject: map[string]Field{
+			"Product":                 {Content: product},
+			"Qty":                     {Content: qty},
+			"Unit Product Price":      {Content: unit},
+			"Discount%":               {Content: discount},
+			"Total Product Qty Price": {Content: total},
+		}}
+	}
+	doc := Document{Fields: map[string]Field{
+		"Purchase Order No.": {Content: "PF131566"},
+		"Order Details": {ValueArray: []Field{
+			row("Wing Chair", "1", "", "0%", "£369.00"),
+			row("Footstool", "2", "0.00", "", "300.00"),
+			row("Discounted", "1", "", "10%", "90.00"),
+			row("No Total", "1", "", "", ""),
+			row("No Qty", "", "", "", "50.00"),
+			row("Priced", "1", "120.00", "", "120.00"),
+		}},
+	}}
+	var logged []string
+	s := &Scanner{Log: func(_ context.Context, format string, args ...any) {
+		logged = append(logged, fmt.Sprintf(format, args...))
+	}}
+
+	got := s.extractOrders(context.Background(), []Document{doc})[0].Products
+
+	want := []float64{369, 150, 0, 0, 0, 120}
+	if len(got) != len(want) {
+		t.Fatalf("extracted %d lines, want %d", len(got), len(want))
+	}
+	for i, w := range want {
+		if got[i].UnitPrice != w {
+			t.Errorf("line %d (%s) unit price = %v, want %v", i, got[i].Code, got[i].UnitPrice, w)
+		}
+	}
+	if len(logged) != 2 {
+		t.Errorf("logged %d repairs, want 2: %q", len(logged), logged)
+	}
+}
+
+// TestFillMissingUnitPrice_PF131566 replays the captured order whose sixth
+// acknowledgement line lost its unit price where the table carried onto page
+// 2. As captured, the line counted as £0 and the order failed on price;
+// repaired, the seven £369 lines agree with BC's one line of 7 and the order
+// passes. Skips when the fixture is not on disk (testdata/orders is ignored).
+func TestFillMissingUnitPrice_PF131566(t *testing.T) {
+	path := filepath.Join("..", "..", "testdata", "orders", "PF131566_20261022T131949Z.json")
+	if _, err := os.Stat(path); err != nil {
+		t.Skipf("no fixture at %s", path)
+	}
+	f, err := app.LoadFixture(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if p := f.POA.Products[5]; p.UnitPrice != 0 {
+		t.Fatalf("captured line 5 unit price = %v; the fixture should hold the extraction miss (0)", p.UnitPrice)
+	}
+	if before := domain.Reconcile(f.POA, f.BC, f.Config); before.WriteOK {
+		t.Fatal("captured order already passes; the fixture no longer shows the defect")
+	}
+
+	poa := f.POA
+	poa.Products = append([]domain.POAProduct(nil), f.POA.Products...)
+	var repaired []int
+	for i := range poa.Products {
+		if fillMissingUnitPrice(&poa.Products[i]) {
+			repaired = append(repaired, i)
+		}
+	}
+	if len(repaired) != 1 || repaired[0] != 5 || poa.Products[5].UnitPrice != 369 {
+		t.Fatalf("repaired lines %v (line 5 unit price %v), want only line 5 at 369", repaired, poa.Products[5].UnitPrice)
+	}
+
+	got := domain.Reconcile(poa, f.BC, f.Config)
+	for _, p := range got.Products {
+		if p.Price.Status != domain.StatusMatch {
+			t.Errorf("POA line %d price %q: %s", p.POAIndex, p.Price.Status, p.Price.Message)
+		}
+	}
+	if !got.WriteOK {
+		t.Errorf("repaired order does not pass the write gate: %d lines flagged", len(got.Flagged()))
 	}
 }

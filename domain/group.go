@@ -712,13 +712,16 @@ func (p *ProductResult) applyGroup(g *LineGroup, poa POAOrder, bc BCOrder, cfg C
 //   - another line of the group is identified on its own, so the product the
 //     charge belongs to is known;
 //   - the line is not a product. A BC line says so by its type (isChargeLine).
-//     A POA line has no type, so it must carry no product code and resemble
-//     no BC product at all — below DescThreshold against every one, the bar
-//     that separates "has comparable description text" from "does not".
+//     A POA line has no type, so it must carry no product code, resemble no
+//     BC product at all — below DescThreshold against every one, the bar that
+//     separates "has comparable description text" from "does not" — and be
+//     worth less than the identified line it would be a charge on.
 //
 // A real product with a weak description keeps its flag: the divan halves of
 // PF131012 print IN20 and resemble the base, and no line beside them is
-// identified.
+// identified. PF129209's chair at 1077 prints no structural code and scored
+// 0.56, so without the last condition its 79 height ring turned the chair
+// into a "charge" on the ring and the order auto-approved.
 func foldCharges(rows []ProductResult, pairs []pairing, cfg Config) {
 	byGroup := map[*LineGroup][]int{}
 	for n, r := range rows {
@@ -727,16 +730,19 @@ func foldCharges(rows []ProductResult, pairs []pairing, cfg Config) {
 		}
 	}
 	for g, ns := range byGroup {
-		identified := false
+		identified, identifiedNet := false, 0.0
 		for _, n := range ns {
-			identified = identified || !rows[n].Description.Failed()
+			if !rows[n].Description.Failed() {
+				identified = true
+				identifiedNet += rows[n].POA.Net()
+			}
 		}
 		if !identified || rows[ns[0]].Price.Failed() {
 			continue
 		}
 		for _, n := range ns {
 			r := &rows[n]
-			if !r.Description.Failed() || !isFoldedCharge(*r, g.Kind, pairs, cfg) {
+			if !r.Description.Failed() || !isFoldedCharge(*r, g.Kind, identifiedNet, pairs, cfg) {
 				continue
 			}
 			r.Description.FoldedCharge = true
@@ -755,12 +761,15 @@ func foldCharges(rows []ProductResult, pairs []pairing, cfg Config) {
 }
 
 // isFoldedCharge reports whether a group row's line on the many side is a
-// charge rather than a product. See foldCharges.
-func isFoldedCharge(r ProductResult, kind GroupKind, pairs []pairing, cfg Config) bool {
+// charge rather than a product. See foldCharges. identifiedNet is the POA value
+// of the group's identified lines, which only an aggregate group's POA lines
+// are compared with: a split group has one POA line, and its BC lines declare
+// what they are by type.
+func isFoldedCharge(r ProductResult, kind GroupKind, identifiedNet float64, pairs []pairing, cfg Config) bool {
 	if kind == GroupSplit {
 		return isChargeLine(r.BC)
 	}
-	if productCodeIn(r.POA.Text(), cfg) != "" {
+	if productCodeIn(r.POA.Text(), cfg) != "" || r.POA.Net() >= identifiedNet {
 		return false
 	}
 	seen := false

@@ -73,7 +73,7 @@ func newService(scans []domain.POAOrder, orders fakeOrders, emb *oneHotEmbedder)
 		Orders:   orders,
 		Embedder: emb,
 		Config:   domain.DefaultConfig(),
-		Log:      func(string, ...any) {},
+		Log:      func(context.Context, string, ...any) {},
 	}
 }
 
@@ -179,6 +179,65 @@ func TestService_NothingExtractedIsAnError(t *testing.T) {
 		Analyze(context.Background(), "POA/x.pdf", "Model")
 	if err == nil {
 		t.Error("a document with no purchase orders returned no error")
+	}
+}
+
+// TestService_LinesWithoutFiguresAreAnError: a document whose lines carry no
+// quantity, price or line total is reported as unreadable for that PF, before
+// Business Central is asked, while a PF beside it reconciles as usual. Shaped
+// on PF132080's customs document: codes, a tariff line, a country of origin.
+func TestService_LinesWithoutFiguresAreAnError(t *testing.T) {
+	emb := &oneHotEmbedder{axis: map[string]int{}}
+	scans := []domain.POAOrder{
+		{PF: "PF1", Products: []domain.POAProduct{
+			{Code: "FLOD3201074166UP3216"},
+			{Code: "OIL C16-250"},
+			{Description3: "Lithuania"},
+		}},
+		{PF: "PF2", Products: []domain.POAProduct{line("PF2 sofa", 1, 100)}},
+	}
+	// BC failing for PF1 proves it is never asked: that error would win.
+	out, err := newService(scans, fakeOrders{fail: "PF1"}, emb).Analyze(context.Background(), "POA/x.pdf", "Model")
+	if err != nil {
+		t.Fatalf("Analyze failed the whole request: %v", err)
+	}
+	if !errors.Is(out[0].Err, ErrNoLineFigures) {
+		t.Fatalf("PF1 err = %v, want ErrNoLineFigures", out[0].Err)
+	}
+	if !strings.Contains(out[0].Err.Error(), "3 line(s) read") {
+		t.Errorf("PF1 err = %q, want the line count", out[0].Err)
+	}
+	for _, text := range emb.asked {
+		if strings.Contains(text, "FLOD") || strings.Contains(text, "Lithuania") {
+			t.Errorf("PF1's lines were embedded (%q): nothing should run for an unreadable document", text)
+		}
+	}
+	if out[1].Err != nil || !out[1].Result.WriteOK {
+		t.Errorf("PF2 = err %v, writeOK %v; want a clean result unaffected by PF1", out[1].Err, out[1].Result.WriteOK)
+	}
+}
+
+// TestService_AnyLineFigureIsEnoughToReconcile: one figure on one line — a
+// quantity without a price, or a printed total alone — still reconciles; and
+// the stated total travels with the error when nothing else does.
+func TestService_AnyLineFigureIsEnoughToReconcile(t *testing.T) {
+	for name, p := range map[string]domain.POAProduct{
+		"quantity only":   {Description: "PF1 sofa", Qty: 1},
+		"line total only": {Description: "PF1 sofa", LineTotal: domain.Ptr(100.0)},
+	} {
+		scans := []domain.POAOrder{{PF: "PF1", Products: []domain.POAProduct{{Description: "fabric note"}, p}}}
+		out, _ := newService(scans, fakeOrders{}, &oneHotEmbedder{axis: map[string]int{}}).
+			Analyze(context.Background(), "POA/x.pdf", "Model")
+		if out[0].Err != nil {
+			t.Errorf("%s: err = %v, want the order reconciled", name, out[0].Err)
+		}
+	}
+
+	scans := []domain.POAOrder{{PF: "PF1", TotalExVAT: domain.Ptr(1422.0), Products: []domain.POAProduct{{Code: "Rowen Cuddler"}}}}
+	out, _ := newService(scans, fakeOrders{}, &oneHotEmbedder{axis: map[string]int{}}).
+		Analyze(context.Background(), "POA/x.pdf", "Model")
+	if !errors.Is(out[0].Err, ErrNoLineFigures) || !strings.Contains(out[0].Err.Error(), "order total 1422.00 stated") {
+		t.Errorf("err = %v, want ErrNoLineFigures quoting the stated total", out[0].Err)
 	}
 }
 
