@@ -155,6 +155,7 @@ func (s *Service) reconcileOne(ctx context.Context, poaOrder domain.POAOrder, pa
 		return Outcome{PF: poaOrder.PF, Run: rec, Err: err}
 	}
 	rec.OrderNumberUsed = stats.OrderNumberUsed
+	rec.OrderReadFrom = stats.OrderReadFrom
 	rec.BCLinesFetched = stats.LinesFetched
 	rec.BCProductsBuilt = len(bcOrder.Products)
 	rec.ItemNamesRequested = stats.ItemNamesRequested

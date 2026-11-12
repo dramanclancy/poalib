@@ -189,6 +189,20 @@ func escapeODataString(s string) string {
 	return strings.ReplaceAll(s, "'", "''")
 }
 
+// purchaseOrderQuery is the path and query GetPurchaseOrder requests.
+func purchaseOrderQuery(poNumber string) string {
+	params := url.Values{}
+	params.Set("$filter", fmt.Sprintf("number eq '%s'", escapeODataString(poNumber)))
+	params.Set("$expand", "purchaseOrderLines")
+	return "/purchaseOrders?" + params.Encode()
+}
+
+// PurchaseOrderURL is the request GetPurchaseOrder makes for poNumber, for
+// the log. The token travels in a header, so the URL holds no secret.
+func (c *BCClient) PurchaseOrderURL(poNumber string) string {
+	return c.baseURL + purchaseOrderQuery(poNumber)
+}
+
 // GetPurchaseOrder fetches a purchase order by its document number ("PO-001234"),
 // with lines expanded. Returns an error if no PO matches.
 
@@ -196,11 +210,7 @@ func (c *BCClient) GetPurchaseOrder(ctx context.Context, poNumber string) (*Purc
 	if poNumber == "" {
 		return nil, errors.New("businesscentral: empty purchase order number")
 	}
-	params := url.Values{}
-	params.Set("$filter", fmt.Sprintf("number eq '%s'", escapeODataString(poNumber)))
-	params.Set("$expand", "purchaseOrderLines")
-
-	body, status, err := c.doRequest(ctx, http.MethodGet, "/purchaseOrders?"+params.Encode(), nil, nil)
+	body, status, err := c.doRequest(ctx, http.MethodGet, purchaseOrderQuery(poNumber), nil, nil)
 	if err != nil {
 		return nil, err
 	}

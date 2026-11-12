@@ -42,6 +42,10 @@ type OrderStats struct {
 	// only when it differs from the one printed on the acknowledgement.
 	OrderNumberUsed string `json:"orderNumberUsed,omitempty"`
 
+	// OrderReadFrom names the OData pages the order came from, set only when
+	// the v2.0 API held no such order and the pages did.
+	OrderReadFrom string `json:"orderReadFrom,omitempty"`
+
 	LinesFetched int `json:"linesFetched"`
 
 	// Item names lead the description the comparison reads; a line whose

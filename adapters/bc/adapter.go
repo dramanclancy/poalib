@@ -22,8 +22,12 @@ import (
 // matching rather than failing an order. The resulting BCOrder records which
 // of those happened, so a check never claims BC holds no code when nobody
 // asked BC.
+//
+// Pages may be nil too. It is asked only for an order the v2.0 API says does
+// not exist; see orderpages.go for the order that made it necessary.
 type Source struct {
 	Orders *BCClient
+	Pages  *OrderPagesClient
 	Items  *CaseysClient
 	Log    func(ctx context.Context, format string, args ...any)
 }
@@ -79,8 +83,12 @@ func (s *Source) Order(ctx context.Context, pf string) (domain.BCOrder, app.Orde
 // OrderStats and printed on the report. Reconciling against a different order
 // than the one printed is a fact a reader must be told, not a convenience to
 // perform silently.
+//
+// Each number is asked of the v2.0 API and then, if that holds no such order,
+// of the OData pages, before the next number is tried: the printed number on
+// either surface beats a shortened one on the first.
 func (s *Source) fetchOrder(ctx context.Context, pf string, stats *app.OrderStats) (*PurchaseOrder, error) {
-	po, err := s.Orders.GetPurchaseOrder(ctx, pf)
+	po, err := s.lookup(ctx, pf, stats)
 	if err == nil {
 		return po, nil
 	}
@@ -89,7 +97,7 @@ func (s *Source) fetchOrder(ctx context.Context, pf string, stats *app.OrderStat
 	}
 
 	for _, base := range fallbackOrderNumbers(pf) {
-		fallback, ferr := s.Orders.GetPurchaseOrder(ctx, base)
+		fallback, ferr := s.lookup(ctx, base, stats)
 		if errors.Is(ferr, ErrPurchaseOrderNotFound) {
 			continue
 		}
@@ -105,6 +113,41 @@ func (s *Source) fetchOrder(ctx context.Context, pf string, stats *app.OrderStat
 		return fallback, nil
 	}
 	return nil, err
+}
+
+// lookup asks the v2.0 API for number and, when it answers that there is no
+// such order, the OData pages. Every "no such order" is logged with the URL
+// that produced it: the answer is an empty 200, indistinguishable in the
+// error from a wrong company, entity or filter unless the request is shown.
+func (s *Source) lookup(ctx context.Context, number string, stats *app.OrderStats) (*PurchaseOrder, error) {
+	po, err := s.Orders.GetPurchaseOrder(ctx, number)
+	if err == nil || !errors.Is(err, ErrPurchaseOrderNotFound) {
+		return po, err
+	}
+	s.logf(ctx, "BC holds no purchase order %q at GET %s", number, s.Orders.PurchaseOrderURL(number))
+	if s.Pages == nil {
+		return nil, err
+	}
+
+	po, perr := s.Pages.GetPurchaseOrder(ctx, number)
+	if errors.Is(perr, ErrPurchaseOrderNotFound) {
+		s.logf(ctx, "BC holds no purchase order %q at GET %s", number, s.Pages.HeaderURL(number))
+		return nil, err
+	}
+	if perr != nil {
+		// The pages could not be read, which is not the same as the order not
+		// existing: say so rather than report the v2.0 "not found".
+		return nil, perr
+	}
+	stats.OrderReadFrom = orderHeaderPage + " and " + orderLinesPage
+	s.logf(ctx, "purchase order %q is missing from the v2.0 API; read from the %s pages instead", number, stats.OrderReadFrom)
+	return po, nil
+}
+
+func (s *Source) logf(ctx context.Context, format string, args ...any) {
+	if s.Log != nil {
+		s.Log(ctx, format, args...)
+	}
 }
 
 // fallbackOrderNumbers lists what to try, in order, once Business Central has
